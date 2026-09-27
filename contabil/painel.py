@@ -25,7 +25,7 @@ def _mes(d):
     return s[:7] if len(s) >= 7 and s[4] == "-" else None
 
 
-def compute_dados(tx):
+def compute_dados(tx, contas=None):
     """Transforma os lançamentos reais no dicionário que o painel consome."""
     despesas = [t for t in tx if t.get("tipo") == "Despesa" and float(t.get("saida") or 0) > 0]
     receitas = [t for t in tx if t.get("tipo") == "Receita" and float(t.get("entrada") or 0) > 0]
@@ -123,6 +123,25 @@ def compute_dados(tx):
                 "cat": t.get("categoria") or "", "valor": round(float(t.get("entrada") or 0) - float(t.get("saida") or 0), 2)}
                for t in tx_ord]
 
+    # contas a pagar/receber (guardadas como JSON em settings)
+    contas = contas or []
+
+    def _fmt_venc(v):
+        s = str(v or "")
+        return (s[8:10] + "/" + s[5:7]) if len(s) >= 10 else s
+
+    def _item(c):
+        return {"data": _fmt_venc(c.get("venc")), "nome": c.get("desc") or c.get("cat") or "Conta",
+                "cat": c.get("cat") or "", "valor": round(float(c.get("valor") or 0), 2)}
+    pend = [c for c in contas if c.get("status", "pendente") == "pendente"]
+    pagar = sorted([c for c in pend if c.get("tipo") == "pagar"], key=lambda c: str(c.get("venc", "")))
+    receber = sorted([c for c in pend if c.get("tipo") == "receber"], key=lambda c: str(c.get("venc", "")))
+    contas_d = {
+        "pagar": [_item(c) for c in pagar], "receber": [_item(c) for c in receber],
+        "totalPagar": round(sum(float(c.get("valor") or 0) for c in pagar), 2),
+        "totalReceber": round(sum(float(c.get("valor") or 0) for c in receber), 2),
+    }
+
     return {
         "temDados": True,
         "mesAtual": f"{NOMES_MES[int(mes_atual[5:7])]} {ano_atual}",
@@ -130,6 +149,7 @@ def compute_dados(tx):
         "realizadoPlanejado": realizadoPlanejado, "catPct": catPct, "cartoes": cartoes,
         "rankDespesa": rankDespesa, "composicaoReceita": composicaoReceita,
         "porAno": porAno, "saldoConta": saldoConta, "ultimos": ultimos,
+        "contas": contas_d,
     }
 
 
@@ -196,6 +216,17 @@ svg{display:block;width:100%;height:auto}.axis{fill:var(--muted);font-size:10px;
 .tx .am{font-family:"IBM Plex Mono",monospace;font-weight:600;font-size:12.5px}.pos{color:var(--teal-2)}.neg{color:var(--orange-2)}
 .soon{background:var(--surface);border:1px dashed var(--border-strong);border-radius:var(--r);padding:44px 20px;text-align:center;color:var(--muted)}
 .soon b{color:var(--ink);font-family:"Bricolage Grotesque";font-size:17px}.soon p{max-width:440px;margin:8px auto 0;font-size:13px}
+#tip{position:fixed;z-index:99;pointer-events:none;background:#0f1b21;color:#fff;font-size:11.5px;font-weight:600;padding:5px 9px;border-radius:7px;opacity:0;transition:opacity .08s;font-family:"IBM Plex Sans",sans-serif;white-space:nowrap;box-shadow:0 5px 16px rgba(0,0,0,.28);line-height:1.35}
+.hoverable{cursor:default}
+.ctabs{display:inline-flex;background:var(--surface-2);border:1px solid var(--border);border-radius:10px;padding:3px;margin-bottom:12px}
+.ctabs button{border:0;background:none;font:inherit;font-size:12.5px;font-weight:500;color:var(--muted);padding:6px 14px;border-radius:8px;cursor:pointer}
+.ctabs button.on{background:var(--surface);color:var(--ink);box-shadow:var(--shadow)}
+.pend{display:flex;flex-direction:column;gap:2px}
+.pend .day{font-size:11px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.04em;margin:12px 0 3px}
+.pend .it{display:flex;align-items:center;gap:10px;padding:9px 2px;border-bottom:1px solid var(--border)}.pend .it:last-child{border:0}
+.pend .nm{flex:1;min-width:0;font-size:13px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pend .nm small{display:block;color:var(--muted);font-size:11px;font-weight:400}
+.pend .am{font-family:"IBM Plex Mono",monospace;font-weight:600;font-size:13px}
+.empty{color:var(--muted);font-size:13px;text-align:center;padding:30px 10px}
 .view[hidden]{display:none}
 .app{grid-template-columns:180px 1fr}
 @media(max-width:640px){.app{grid-template-columns:1fr}.side{flex-direction:row;overflow-x:auto;border-right:0;border-bottom:1px solid var(--border)}.brand small{display:none}.nav{width:auto;white-space:nowrap}.kpis,.grid2{grid-template-columns:1fr}.rp{flex-direction:column-reverse;align-items:stretch}.donutwrap{width:100%}.ranked .row{grid-template-columns:100px 1fr auto}}
@@ -240,21 +271,38 @@ svg{display:block;width:100%;height:auto}.axis{fill:var(--muted);font-size:10px;
       </div>
     </section>
 
-    <section class="view" data-v="pend" hidden><div class="soon"><p style="font-size:32px;margin:0">📅</p><b>Contas a Pagar e a Receber</b><p>Precisa da coluna de <b>status</b> (pendente/concluído) nos lançamentos. Vamos ativar isso no próximo passo — aí seus vencimentos aparecem aqui automaticamente.</p></div></section>
+    <section class="view" data-v="pend" hidden>
+      <div class="kpis" id="ckpis"></div>
+      <div class="card"><div class="hd"><h3>Pendências</h3></div>
+        <div class="ctabs"><button class="on" data-ct="pagar">A pagar</button><button data-ct="receber">A receber</button></div>
+        <div class="pend" id="pendlist"></div>
+      </div>
+      <p style="font-size:12px;color:var(--muted);margin:6px 2px 0">Cadastre e dê baixa nas contas logo abaixo do painel (seção <b>“Contas a pagar/receber”</b>).</p>
+    </section>
     <section class="view" data-v="planos" hidden><div class="soon"><p style="font-size:32px;margin:0">🎯</p><b>Planos &amp; Metas</b><p>Aqui vão entrar suas metas (reserva, quitar financiamento, os 11 milhões). Precisa do cadastro de planos — próximo passo.</p></div></section>
     <section class="view" data-v="inv" hidden><div class="soon"><p style="font-size:32px;margin:0">💰</p><b>Investimentos</b><p>Seu patrimônio e o Grau de Independência Financeira rumo aos 11 mi. Precisa do cadastro de investimentos — próximo passo.</p></div></section>
   </main>
 </div>
+<div id="tip"></div>
 <script>
 const DADOS=/*__DADOS__*/;
 const SVG="http://www.w3.org/2000/svg",el=(t,a={})=>{const e=document.createElementNS(SVG,t);for(const k in a)e.setAttribute(k,a[k]);return e;};
 const brl=v=>"R$ "+Number(v).toLocaleString('pt-BR',{minimumFractionDigits:0,maximumFractionDigits:0});
 const brl2=v=>Number(v).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
-function donut(svg,cx,cy,r,sw,pct,color,big,small){const C=2*Math.PI*r,len=Math.min(pct,100)/100*C;
+const TIP=document.getElementById('tip');
+function tip(elm,txt){if(!elm)return;elm.style.cursor='default';
+  elm.addEventListener('mousemove',e=>{TIP.innerHTML=txt;TIP.style.opacity=1;let x=e.clientX+12,y=e.clientY-6;
+    if(x+140>innerWidth)x=e.clientX-150;TIP.style.left=x+'px';TIP.style.top=y+'px';});
+  elm.addEventListener('mouseleave',()=>{TIP.style.opacity=0;});}
+function donut(svg,cx,cy,r,sw,pct,color,big,small,tiptxt){const C=2*Math.PI*r,len=Math.min(pct,100)/100*C;
   svg.appendChild(el('circle',{cx,cy,r,fill:'none',stroke:'var(--surface-2)','stroke-width':sw}));
-  svg.appendChild(el('circle',{cx,cy,r,fill:'none',stroke:color,'stroke-width':sw,'stroke-linecap':'round','stroke-dasharray':`${len} ${C-len}`,'stroke-dashoffset':C*0.25,transform:`rotate(-90 ${cx} ${cy})`}));
+  const arc=el('circle',{cx,cy,r,fill:'none',stroke:color,'stroke-width':sw,'stroke-linecap':'round','stroke-dasharray':`${len} ${C-len}`,'stroke-dashoffset':C*0.25,transform:`rotate(-90 ${cx} ${cy})`});
+  svg.appendChild(arc);if(tiptxt)tip(arc,tiptxt);
   if(big){const t=el('text',{x:cx,y:cy+(small?0:5),'text-anchor':'middle'});t.setAttribute('style','font-family:Bricolage Grotesque;font-weight:700;font-size:22px;fill:var(--ink)');t.textContent=big;svg.appendChild(t);}
   if(small){const t=el('text',{x:cx,y:cy+15,'text-anchor':'middle'});t.setAttribute('style','fill:var(--muted);font-size:9px');t.textContent=small;svg.appendChild(t);}}
+function _bands(s,labels,arrR,arrD,ml,mt,pW,pH,n){for(let i=0;i<n;i++){const w=pW/n,cx=ml+(n<=1?pW/2:i*(pW/(n-1)));
+  const rc=el('rect',{x:cx-w/2,y:mt,width:w,height:pH,fill:'transparent'});s.appendChild(rc);
+  tip(rc,`<b>${labels[i]}</b><br>Receita: R$ ${brl2(arrR[i])}<br>Despesa: R$ ${brl2(arrD[i])}`);}}
 function areaChart(id,arrR,arrD,labels,W,H){const s=document.getElementById(id);if(!s)return;s.innerHTML='';
   const ml=42,mr=12,mt=14,mb=26,pW=W-ml-mr,pH=H-mt-mb,n=labels.length||1;
   const yMax=Math.max(1,...arrR,...arrD)*1.12,step=niceStep(yMax);
@@ -266,7 +314,10 @@ function areaChart(id,arrR,arrD,labels,W,H){const s=document.getElementById(id);
   s.appendChild(el('path',{d:ap(arrR),fill:'var(--teal-soft)'}));s.appendChild(el('path',{d:ap(arrD),fill:'var(--orange-soft)'}));
   s.appendChild(el('path',{d:lp(arrR),fill:'none',stroke:'var(--teal)','stroke-width':2.2,'stroke-linejoin':'round'}));
   s.appendChild(el('path',{d:lp(arrD),fill:'none',stroke:'var(--orange)','stroke-width':2.2,'stroke-linejoin':'round'}));
-  labels.forEach((m,i)=>{const t=el('text',{class:'mlab',x:X(i),y:H-10});t.textContent=m;s.appendChild(t);});}
+  arrR.forEach((v,i)=>s.appendChild(el('circle',{cx:X(i),cy:Y(v),r:2.4,fill:'var(--teal)'})));
+  arrD.forEach((v,i)=>s.appendChild(el('circle',{cx:X(i),cy:Y(v),r:2.4,fill:'var(--orange)'})));
+  labels.forEach((m,i)=>{const t=el('text',{class:'mlab',x:X(i),y:H-10});t.textContent=m;s.appendChild(t);});
+  _bands(s,labels,arrR,arrD,ml,mt,pW,pH,n);}
 function barsChart(id,arrR,arrD,labels,W,H){const s=document.getElementById(id);if(!s)return;s.innerHTML='';
   const ml=42,mr=12,mt=14,mb=26,pW=W-ml-mr,pH=H-mt-mb,n=labels.length||1,colW=pW/n,bw=colW*0.30;
   const yMax=Math.max(1,...arrR,...arrD)*1.12,step=niceStep(yMax);
@@ -275,11 +326,25 @@ function barsChart(id,arrR,arrD,labels,W,H){const s=document.getElementById(id);
   for(let i=0;i<n;i++){const cx=ml+i*colW+colW/2,hr=arrR[i]/yMax*pH,hd=arrD[i]/yMax*pH;
     s.appendChild(el('rect',{x:cx-bw-1,y:mt+pH-hr,width:bw,height:hr,rx:3,fill:'var(--teal)'}));
     s.appendChild(el('rect',{x:cx+1,y:mt+pH-hd,width:bw,height:hd,rx:3,fill:'var(--orange)'}));
-    const t=el('text',{class:'mlab',x:cx,y:H-10});t.textContent=labels[i];s.appendChild(t);}}
+    const t=el('text',{class:'mlab',x:cx,y:H-10});t.textContent=labels[i];s.appendChild(t);}
+  _bands(s,labels,arrR,arrD,ml,mt,pW,pH,n);}
 function niceStep(m){const raw=m/4,p=Math.pow(10,Math.floor(Math.log10(raw)));const n=raw/p;return (n>=5?5:n>=2?2:1)*p||1;}
 function ranked(id,items,teal){const h=document.getElementById(id);if(!h)return;h.innerHTML='';const max=Math.max(1,...items.map(x=>Math.abs(x.valor)));
   items.forEach(x=>{const row=document.createElement('div');row.className='row';
-    row.innerHTML=`<div class="nm">${x.nome}</div><div class="bar"><i class="${teal?'t':''}" style="width:${Math.round(Math.abs(x.valor)/max*100)}%"></i></div><div class="vv">${brl(x.valor)}</div>`;h.appendChild(row);});}
+    row.innerHTML=`<div class="nm">${x.nome}</div><div class="bar"><i class="${teal?'t':''}" style="width:${Math.round(Math.abs(x.valor)/max*100)}%"></i></div><div class="vv">${brl(x.valor)}</div>`;
+    h.appendChild(row);tip(row,`${x.nome}<br>R$ ${brl2(x.valor)}`);});}
+
+function renderContas(){const c=DADOS.contas||{pagar:[],receber:[],totalPagar:0,totalReceber:0},sp=c.totalReceber-c.totalPagar;
+  document.getElementById('ckpis').innerHTML=
+   `<div class="kpi d"><div class="ico">⏳</div><div><div class="lbl">A pagar</div><div class="val neg"><span class="c">R$</span>${brl2(c.totalPagar)}</div></div></div>
+    <div class="kpi r"><div class="ico">📥</div><div><div class="lbl">A receber</div><div class="val pos"><span class="c">R$</span>${brl2(c.totalReceber)}</div></div></div>
+    <div class="kpi s"><div class="ico">${sp>=0?'✓':'!'}</div><div><div class="lbl">Saldo previsto</div><div class="val ${sp>=0?'pos':'neg'}"><span class="c">R$</span>${brl2(sp)}</div></div></div>`;
+  drawPend('pagar');}
+function drawPend(tp){const h=document.getElementById('pendlist');if(!h)return;h.innerHTML='';const arr=(DADOS.contas||{})[tp]||[];
+  if(!arr.length){h.innerHTML='<div class="empty">Nada pendente aqui. Cadastre logo abaixo do painel. 🎉</div>';return;}
+  let day='';arr.forEach(x=>{if(x.data!==day){day=x.data;const d=document.createElement('div');d.className='day';d.textContent=x.data;h.appendChild(d);}
+    const it=document.createElement('div');it.className='it';const pos=tp==='receber';
+    it.innerHTML=`<div class="nm">${x.nome}<small>${x.cat}</small></div><div class="am ${pos?'pos':'neg'}">${pos?'+':'−'}${brl2(x.valor)}</div>`;h.appendChild(it);});}
 
 function build(){
   if(!DADOS.temDados){document.querySelector('.main').innerHTML='<div class="soon"><p style="font-size:32px;margin:0">📥</p><b>Sem dados ainda</b><p>Importe faturas/extratos (aba Importar, aqui embaixo) e clique em Salvar no histórico. Aí o painel ganha vida.</p></div>';return;}
@@ -294,13 +359,14 @@ function build(){
   const rl=document.getElementById('rplist');let tr=0,tp=0;
   DADOS.realizadoPlanejado.forEach(x=>{tr+=x.real;tp+=x.plan;const pc=x.plan>0?Math.round(x.real/x.plan*100):100,o=pc>110;
     const row=document.createElement('div');row.className='row';
-    row.innerHTML=`<div class="nm">${x.nome}</div><div class="vv">${brl(x.real)}</div><div class="bar"><i class="${o?'over':''}" style="width:${Math.min(pc,100)}%"></i></div><div class="pc ${o?'over':''}">${pc}%</div>`;rl.appendChild(row);});
-  const pct=tp>0?Math.round(tr/tp*100):100;donut(document.getElementById('donut'),65,65,48,15,pct,pct>110?'var(--over)':'var(--orange)',pct+'%','vs média');
+    row.innerHTML=`<div class="nm">${x.nome}</div><div class="vv">${brl(x.real)}</div><div class="bar"><i class="${o?'over':''}" style="width:${Math.min(pc,100)}%"></i></div><div class="pc ${o?'over':''}">${pc}%</div>`;rl.appendChild(row);
+    tip(row,`${x.nome}<br>Gasto: R$ ${brl2(x.real)} · sua média: R$ ${brl2(x.plan)}`);});
+  const pct=tp>0?Math.round(tr/tp*100):100;donut(document.getElementById('donut'),65,65,48,15,pct,pct>110?'var(--over)':'var(--orange)',pct+'%','vs média',`Você gastou ${pct}% da sua média`);
   // % por categoria
   (function(){const s=document.getElementById('catbars'),cats=DADOS.catPct,W=560,H=220,ml=8,mr=8,mt=18,mb=52,pW=W-ml-mr,pH=H-mt-mb;
     const yMax=Math.max(1,...cats.map(c=>c.pct))*1.15,colW=pW/(cats.length||1),bw=Math.min(38,colW*0.5);
     cats.forEach((c,i)=>{const cx=ml+i*colW+colW/2,h=c.pct/yMax*pH,y=mt+pH-h;
-      s.appendChild(el('rect',{x:cx-bw/2,y,width:bw,height:h,rx:5,fill:'var(--orange)'}));
+      const rb=el('rect',{x:cx-bw/2,y,width:bw,height:h,rx:5,fill:'var(--orange)'});s.appendChild(rb);tip(rb,`${c.nome}<br>${c.pct.toFixed(1).replace('.',',')}% da receita do mês`);
       const t=el('text',{x:cx,y:y-5,'text-anchor':'middle'});t.setAttribute('style','fill:var(--ink);font-size:10.5px;font-weight:600;font-family:IBM Plex Mono');t.textContent=c.pct.toFixed(1).replace('.',',')+'%';s.appendChild(t);
       const l=el('text',{x:cx,y:mt+pH+15,'text-anchor':'end',transform:`rotate(-30 ${cx} ${mt+pH+15})`});l.setAttribute('class','mlab');l.textContent=(c.nome||'').slice(0,14);s.appendChild(l);});})();
   ranked('cards',DADOS.cartoes.length?DADOS.cartoes.map(c=>({nome:c.nome,valor:c.gasto})):[{nome:'Sem gasto em cartão no mês',valor:0}]);
@@ -310,22 +376,24 @@ function build(){
   (function(){const cats=DADOS.composicaoReceita,cores=['var(--teal)','var(--teal-2)','var(--orange)','var(--violet)','var(--muted)'];
     const s=document.getElementById('donutrec'),cx=70,cy=70,r=50,C=2*Math.PI*r;let off=0;
     s.appendChild(el('circle',{cx,cy,r,fill:'none',stroke:'var(--surface-2)','stroke-width':17}));
-    cats.forEach((c,i)=>{const len=c.pct/100*C;s.appendChild(el('circle',{cx,cy,r,fill:'none',stroke:cores[i%5],'stroke-width':17,'stroke-dasharray':`${len} ${C-len}`,'stroke-dashoffset':-off+C*0.25,transform:`rotate(-90 ${cx} ${cy})`}));off+=len;});
+    cats.forEach((c,i)=>{const len=c.pct/100*C;const seg=el('circle',{cx,cy,r,fill:'none',stroke:cores[i%5],'stroke-width':17,'stroke-dasharray':`${len} ${C-len}`,'stroke-dashoffset':-off+C*0.25,transform:`rotate(-90 ${cx} ${cy})`});s.appendChild(seg);tip(seg,`${c.nome}<br>${c.pct.toFixed(1).replace('.',',')}%`);off+=len;});
     if(cats[0]){const t=el('text',{x:cx,y:cy+5,'text-anchor':'middle'});t.setAttribute('style','font-family:Bricolage Grotesque;font-weight:700;font-size:16px;fill:var(--ink)');t.textContent=cats[0].pct.toFixed(0)+'%';s.appendChild(t);}
     const leg=document.getElementById('reclegend');cats.forEach((c,i)=>{const row=document.createElement('div');row.className='row';
       row.innerHTML=`<div class="nm"><span style="display:inline-block;width:9px;height:9px;border-radius:3px;background:${cores[i%5]};margin-right:6px"></span>${c.nome}</div><div class="vv">${c.pct.toFixed(1).replace('.',',')}%</div>`;leg.appendChild(row);});})();
   document.getElementById('saldoAno').textContent='Saldo '+brl(DADOS.porAno.saldo);
   (function(){const s=document.getElementById('anoBars'),W=400,H=190,mt=18,mb=28,pH=H-mt-mb,gx=W/2;
     const yMax=Math.max(1,DADOS.porAno.receita,DADOS.porAno.despesa)*1.15,Y=v=>mt+pH-v/yMax*pH;
-    [[gx-70,DADOS.porAno.receita,'var(--teal)'],[gx+10,DADOS.porAno.despesa,'var(--orange)']].forEach(([x,v,c])=>{const h=v/yMax*pH;s.appendChild(el('rect',{x,y:Y(v),width:60,height:h,rx:6,fill:c}));
+    [[gx-70,DADOS.porAno.receita,'var(--teal)','Receitas'],[gx+10,DADOS.porAno.despesa,'var(--orange)','Despesas']].forEach(([x,v,c,nm])=>{const h=v/yMax*pH;const rb=el('rect',{x,y:Y(v),width:60,height:h,rx:6,fill:c});s.appendChild(rb);tip(rb,`${nm} ${DADOS.ano}<br>R$ ${brl2(v)}`);
       const t=el('text',{x:x+30,y:Y(v)-7,'text-anchor':'middle'});t.setAttribute('style','fill:var(--ink);font-size:11px;font-weight:700;font-family:IBM Plex Mono');t.textContent=brl(v);s.appendChild(t);});
     [['Receitas',gx-40],['Despesas',gx+40]].forEach(([n,x])=>{const l=el('text',{x,y:H-9,'text-anchor':'middle'});l.setAttribute('class','mlab');l.textContent=n;s.appendChild(l);});})();
   ranked('saldoconta',DADOS.saldoConta,true);
+  renderContas();
 }
 document.querySelectorAll('.nav').forEach(b=>b.addEventListener('click',()=>{
   document.querySelectorAll('.nav').forEach(x=>x.classList.remove('active'));b.classList.add('active');
   const v=b.dataset.view;document.querySelectorAll('.view').forEach(sec=>sec.hidden=(sec.dataset.v!==v));
   const titles={dash:'Balanço Mensal',anal:'Análises',pend:'Contas a Pagar e a Receber',planos:'Planos & Metas',inv:'Investimentos'};
   document.getElementById('vtitle').textContent=titles[v];}));
+document.querySelectorAll('.ctabs button').forEach(b=>b.addEventListener('click',()=>{document.querySelectorAll('.ctabs button').forEach(x=>x.classList.remove('on'));b.classList.add('on');drawPend(b.dataset.ct);}));
 build();
 </script></body></html>"""

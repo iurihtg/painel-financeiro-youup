@@ -97,11 +97,49 @@ tab_painel, tab_imp, tab_dash, tab_prev = st.tabs(
 
 # ══════════════════════════════ 0. PAINEL (bonito) ══════════════════════════════
 with tab_painel:
+    import uuid as _uuid
     import streamlit.components.v1 as _components
     from contabil import painel as _painel
     _tx = store.load_transactions()
-    _dados = _painel.compute_dados(_tx)
+    _contas = store.get_setting("contas", []) or []
+    _dados = _painel.compute_dados(_tx, _contas)
     _components.html(_painel.render(_dados), height=1500, scrolling=True)
+
+    with st.expander("📅 Contas a pagar/receber — cadastrar e dar baixa"):
+        with st.form("nova_conta", clear_on_submit=True):
+            c1, c2, c3 = st.columns([1, 2, 1])
+            _tipo = c1.selectbox("Tipo", ["A pagar", "A receber"])
+            _desc = c2.text_input("Descrição")
+            _val = c3.number_input("Valor (R$)", min_value=0.0, step=50.0)
+            c4, c5 = st.columns(2)
+            _cat = c4.text_input("Categoria", value="")
+            _venc = c5.date_input("Vencimento", value=dt.date.today())
+            if st.form_submit_button("➕ Adicionar") and _desc and _val > 0:
+                _contas.append({"id": _uuid.uuid4().hex[:8],
+                                "tipo": "pagar" if _tipo == "A pagar" else "receber",
+                                "desc": _desc, "cat": _cat, "valor": float(_val),
+                                "venc": _venc.isoformat(), "status": "pendente"})
+                store.set_setting("contas", _contas)
+                st.success("Conta adicionada.")
+                st.rerun()
+
+        _pend = [c for c in _contas if c.get("status", "pendente") == "pendente"]
+        if _pend:
+            st.caption("Pendentes — clique em Baixar quando pagar/receber:")
+            for c in sorted(_pend, key=lambda x: str(x.get("venc", ""))):
+                cc = st.columns([3, 1, 1])
+                sinal = "−" if c["tipo"] == "pagar" else "+"
+                v = c.get("venc", "")
+                cc[0].write(f"**{c.get('desc')}** · {c.get('cat') or '—'} · vence {v[8:10]}/{v[5:7]}")
+                cc[1].write(f"{sinal} {brl(c.get('valor'))}")
+                if cc[2].button("✓ Baixar", key="baixa_" + c["id"]):
+                    for x in _contas:
+                        if x.get("id") == c["id"]:
+                            x["status"] = "pago"
+                    store.set_setting("contas", _contas)
+                    st.rerun()
+        else:
+            st.info("Sem contas pendentes. Adicione uma acima.")
 
 # ══════════════════════════════ 1. IMPORTAR ══════════════════════════════
 with tab_imp:
