@@ -102,7 +102,9 @@ with tab_painel:
     from contabil import painel as _painel
     _tx = store.load_transactions()
     _contas = store.get_setting("contas", []) or []
-    _dados = _painel.compute_dados(_tx, _contas)
+    _invs = store.get_setting("investimentos", []) or []
+    _meta = store.get_setting("meta_patrimonio", 11_000_000)
+    _dados = _painel.compute_dados(_tx, _contas, _invs, _meta)
     _components.html(_painel.render(_dados), height=1500, scrolling=True)
 
     with st.expander("📅 Contas a pagar/receber — cadastrar e dar baixa"):
@@ -140,6 +142,46 @@ with tab_painel:
                     st.rerun()
         else:
             st.info("Sem contas pendentes. Adicione uma acima.")
+
+    with st.expander("💰 Investimentos — cadastrar, atualizar saldo e meta"):
+        _meta_nova = st.number_input("🎯 Meta de patrimônio (independência financeira)",
+                                     min_value=0, value=int(_meta), step=100_000, format="%d")
+        if _meta_nova != _meta:
+            store.set_setting("meta_patrimonio", int(_meta_nova))
+            st.rerun()
+
+        with st.form("novo_inv", clear_on_submit=True):
+            i1, i2, i3 = st.columns([2, 1, 1])
+            _inst = i1.text_input("Instituição / corretora")
+            _itipo = i2.selectbox("Tipo", ["Renda Fixa", "Renda Variável"])
+            _emis = i3.text_input("Emissor / ativo")
+            i4, i5 = st.columns(2)
+            _iinv = i4.number_input("Valor investido (R$)", min_value=0.0, step=100.0)
+            _isaldo = i5.number_input("Saldo atual (R$)", min_value=0.0, step=100.0)
+            if st.form_submit_button("➕ Adicionar investimento") and _inst and _isaldo > 0:
+                _invs.append({"id": _uuid.uuid4().hex[:8], "instituicao": _inst, "tipo": _itipo,
+                              "emissor": _emis, "produto": _emis, "investido": float(_iinv),
+                              "saldo": float(_isaldo)})
+                store.set_setting("investimentos", _invs)
+                st.success("Investimento adicionado.")
+                st.rerun()
+
+        if _invs:
+            st.caption("Atualize o saldo atual quando quiser (o mercado varia):")
+            for it in _invs:
+                ic = st.columns([3, 1.4, 1])
+                ic[0].write(f"**{it.get('emissor') or it.get('instituicao')}** · {it.get('tipo')} · {it.get('instituicao')}")
+                novo = ic[1].number_input("Saldo", min_value=0.0, value=float(it.get("saldo") or 0),
+                                          step=100.0, key="sld_" + it["id"], label_visibility="collapsed")
+                if novo != float(it.get("saldo") or 0):
+                    it["saldo"] = float(novo)
+                    store.set_setting("investimentos", _invs)
+                    st.rerun()
+                if ic[2].button("🗑️", key="del_" + it["id"]):
+                    store.set_setting("investimentos", [x for x in _invs if x.get("id") != it["id"]])
+                    st.rerun()
+        else:
+            st.info("Sem investimentos cadastrados. Adicione um acima.")
 
 # ══════════════════════════════ 1. IMPORTAR ══════════════════════════════
 with tab_imp:

@@ -25,7 +25,7 @@ def _mes(d):
     return s[:7] if len(s) >= 7 and s[4] == "-" else None
 
 
-def compute_dados(tx, contas=None):
+def compute_dados(tx, contas=None, investimentos=None, meta=11_000_000):
     """Transforma os lançamentos reais no dicionário que o painel consome."""
     despesas = [t for t in tx if t.get("tipo") == "Despesa" and float(t.get("saida") or 0) > 0]
     receitas = [t for t in tx if t.get("tipo") == "Receita" and float(t.get("entrada") or 0) > 0]
@@ -142,6 +142,38 @@ def compute_dados(tx, contas=None):
         "totalReceber": round(sum(float(c.get("valor") or 0) for c in receber), 2),
     }
 
+    # investimentos (JSON em settings)
+    investimentos = investimentos or []
+    patr = sum(float(i.get("saldo") or 0) for i in investimentos)
+    inv0 = sum(float(i.get("investido") or 0) for i in investimentos)
+    rend = patr - inv0
+    comp = defaultdict(float)
+    for i in investimentos:
+        comp[i.get("tipo") or "Outros"] += float(i.get("saldo") or 0)
+    emis = OrderedDict()
+    for i in investimentos:
+        e = i.get("emissor") or i.get("produto") or "—"
+        d = emis.setdefault(e, {"nome": e, "investido": 0.0, "saldo": 0.0})
+        d["investido"] += float(i.get("investido") or 0)
+        d["saldo"] += float(i.get("saldo") or 0)
+    por_emissor = []
+    for d in sorted(emis.values(), key=lambda x: -x["saldo"]):
+        pc = ((d["saldo"] - d["investido"]) / d["investido"] * 100) if d["investido"] else 0
+        por_emissor.append({"nome": d["nome"], "investido": round(d["investido"], 2),
+                            "saldo": round(d["saldo"], 2), "pct": round(pc, 1)})
+    inst = defaultdict(float)
+    for i in investimentos:
+        inst[i.get("instituicao") or "—"] += float(i.get("saldo") or 0)
+    inv_d = {
+        "temInv": bool(investimentos), "patrimonio": round(patr, 2), "investido": round(inv0, 2),
+        "rendimento": round(rend, 2), "rendimentoPct": round((rend / inv0 * 100) if inv0 else 0, 1),
+        "grau": round((patr / meta * 100) if meta else 0, 2), "meta": meta,
+        "composicao": [{"nome": n, "valor": round(v, 2)} for n, v in comp.items()],
+        "porEmissor": por_emissor,
+        "porInstituicao": sorted(({"nome": n, "valor": round(v, 2)} for n, v in inst.items()),
+                                 key=lambda x: -x["valor"]),
+    }
+
     return {
         "temDados": True,
         "mesAtual": f"{NOMES_MES[int(mes_atual[5:7])]} {ano_atual}",
@@ -149,7 +181,7 @@ def compute_dados(tx, contas=None):
         "realizadoPlanejado": realizadoPlanejado, "catPct": catPct, "cartoes": cartoes,
         "rankDespesa": rankDespesa, "composicaoReceita": composicaoReceita,
         "porAno": porAno, "saldoConta": saldoConta, "ultimos": ultimos,
-        "contas": contas_d,
+        "contas": contas_d, "inv": inv_d,
     }
 
 
@@ -227,6 +259,17 @@ svg{display:block;width:100%;height:auto}.axis{fill:var(--muted);font-size:10px;
 .pend .nm{flex:1;min-width:0;font-size:13px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pend .nm small{display:block;color:var(--muted);font-size:11px;font-weight:400}
 .pend .am{font-family:"IBM Plex Mono",monospace;font-weight:600;font-size:13px}
 .empty{color:var(--muted);font-size:13px;text-align:center;padding:30px 10px}
+.invhero{background:linear-gradient(135deg,var(--teal-2),var(--teal));border-radius:var(--r);padding:18px 20px;color:#fff;box-shadow:var(--shadow);display:grid;grid-template-columns:1.3fr 1fr 1fr;gap:16px;align-items:center}
+.invhero .big{font-family:"Bricolage Grotesque";font-weight:700;font-size:36px;line-height:1;letter-spacing:-.02em}
+.invhero .l{font-size:11px;text-transform:uppercase;letter-spacing:.05em;opacity:.85}
+.invhero .v{font-family:"Bricolage Grotesque";font-weight:700;font-size:20px;margin-top:3px}
+.invhero .goal{font-size:12px;opacity:.92;margin-top:6px}
+.invhero .gbar{height:7px;border-radius:99px;background:rgba(255,255,255,.25);overflow:hidden;margin-top:5px}.invhero .gbar i{display:block;height:100%;background:#fff;border-radius:99px}
+.tbl{width:100%;border-collapse:collapse;font-size:12px}
+.tbl th{text-align:left;color:var(--muted);font-weight:600;font-size:10.5px;text-transform:uppercase;letter-spacing:.03em;padding:6px 8px;border-bottom:1px solid var(--border)}
+.tbl td{padding:7px 8px;border-bottom:1px solid var(--border);font-family:"IBM Plex Mono",monospace;font-variant-numeric:tabular-nums}
+.tbl td.n{font-family:"IBM Plex Sans",sans-serif;font-weight:500}.tbl tr:last-child td{border-bottom:0}
+@media(max-width:640px){.invhero{grid-template-columns:1fr}}
 .view[hidden]{display:none}
 .app{grid-template-columns:180px 1fr}
 @media(max-width:640px){.app{grid-template-columns:1fr}.side{flex-direction:row;overflow-x:auto;border-right:0;border-bottom:1px solid var(--border)}.brand small{display:none}.nav{width:auto;white-space:nowrap}.kpis,.grid2{grid-template-columns:1fr}.rp{flex-direction:column-reverse;align-items:stretch}.donutwrap{width:100%}.ranked .row{grid-template-columns:100px 1fr auto}}
@@ -280,7 +323,15 @@ svg{display:block;width:100%;height:auto}.axis{fill:var(--muted);font-size:10px;
       <p style="font-size:12px;color:var(--muted);margin:6px 2px 0">Cadastre e dê baixa nas contas logo abaixo do painel (seção <b>“Contas a pagar/receber”</b>).</p>
     </section>
     <section class="view" data-v="planos" hidden><div class="soon"><p style="font-size:32px;margin:0">🎯</p><b>Planos &amp; Metas</b><p>Aqui vão entrar suas metas (reserva, quitar financiamento, os 11 milhões). Precisa do cadastro de planos — próximo passo.</p></div></section>
-    <section class="view" data-v="inv" hidden><div class="soon"><p style="font-size:32px;margin:0">💰</p><b>Investimentos</b><p>Seu patrimônio e o Grau de Independência Financeira rumo aos 11 mi. Precisa do cadastro de investimentos — próximo passo.</p></div></section>
+    <section class="view" data-v="inv" hidden>
+      <div class="invhero" id="invhero"></div>
+      <div class="grid2" style="margin-top:12px">
+        <div class="card"><div class="hd"><h3>Composição da carteira</h3></div><div class="rp"><div class="donutwrap" style="width:140px"><svg id="carteira" viewBox="0 0 140 140"></svg></div><div class="list" id="carteiraLeg" style="gap:10px"></div></div></div>
+        <div class="card"><div class="hd"><h3>Por instituição</h3></div><div class="rp"><div class="donutwrap" style="width:140px"><svg id="instDonut" viewBox="0 0 140 140"></svg></div><div class="list" id="instLeg" style="gap:10px"></div></div></div>
+      </div>
+      <div class="card"><div class="hd"><h3>Investimentos por emissor</h3></div><div id="emissorTbl"></div></div>
+      <p style="font-size:12px;color:var(--muted);margin:6px 2px 0">Cadastre e atualize seus ativos na seção <b>“Investimentos”</b> logo abaixo do painel.</p>
+    </section>
   </main>
 </div>
 <div id="tip"></div>
@@ -346,6 +397,24 @@ function drawPend(tp){const h=document.getElementById('pendlist');if(!h)return;h
     const it=document.createElement('div');it.className='it';const pos=tp==='receber';
     it.innerHTML=`<div class="nm">${x.nome}<small>${x.cat}</small></div><div class="am ${pos?'pos':'neg'}">${pos?'+':'−'}${brl2(x.valor)}</div>`;h.appendChild(it);});}
 
+function drawDonutList(svgId,legId,items){const s=document.getElementById(svgId);if(!s)return;s.innerHTML='';const cx=70,cy=70,r=50,C=2*Math.PI*r;let off=0;
+  const tt=items.reduce((a,b)=>a+b.valor,0)||1;
+  s.appendChild(el('circle',{cx,cy,r,fill:'none',stroke:'var(--surface-2)','stroke-width':17}));
+  items.forEach(it=>{const pc=it.valor/tt*100,len=pc/100*C;const seg=el('circle',{cx,cy,r,fill:'none',stroke:it.cor,'stroke-width':17,'stroke-dasharray':`${len} ${C-len}`,'stroke-dashoffset':-off+C*0.25,transform:`rotate(-90 ${cx} ${cy})`});s.appendChild(seg);tip(seg,`${it.nome}<br>R$ ${brl2(it.valor)} · ${pc.toFixed(1).replace('.',',')}%`);off+=len;});
+  const leg=document.getElementById(legId);leg.innerHTML='';items.forEach(it=>{const pc=it.valor/tt*100,row=document.createElement('div');row.className='row';
+    row.innerHTML=`<div class="nm"><span style="display:inline-block;width:9px;height:9px;border-radius:3px;background:${it.cor};margin-right:6px"></span>${it.nome}</div><div class="vv">${brl(it.valor)}</div>`;leg.appendChild(row);tip(row,`${it.nome}<br>R$ ${brl2(it.valor)} · ${pc.toFixed(1).replace('.',',')}%`);});}
+function renderInv(){const iv=DADOS.inv,cores=['var(--teal)','var(--orange)','var(--violet)','var(--teal-2)','var(--muted)'],c2={'Renda Fixa':'var(--teal)','Renda Variável':'var(--orange)'};
+  if(!iv||!iv.temInv){document.querySelector('[data-v="inv"]').innerHTML='<div class="soon"><p style="font-size:32px;margin:0">💰</p><b>Investimentos</b><p>Cadastre seus ativos na seção “Investimentos” logo abaixo do painel. Aí seu patrimônio e o Grau de Independência aparecem aqui.</p></div>';return;}
+  document.getElementById('invhero').innerHTML=`<div><div class="l">⭐ Grau de Independência Financeira</div><div class="big">${iv.grau.toFixed(1).replace('.',',')}%</div>
+    <div class="goal">Rumo aos ${brl(iv.meta)} · patrimônio ${brl(iv.patrimonio)}</div><div class="gbar"><i style="width:${Math.min(iv.grau,100)}%"></i></div></div>
+    <div><div class="l">Patrimônio investido</div><div class="v">R$ ${brl2(iv.patrimonio)}</div></div>
+    <div><div class="l">Rendimento</div><div class="v">R$ ${brl2(iv.rendimento)}</div><div class="goal">${iv.rendimentoPct>=0?'+':''}${iv.rendimentoPct.toFixed(1).replace('.',',')}% sobre o investido</div></div>`;
+  drawDonutList('carteira','carteiraLeg',iv.composicao.map((c,i)=>({nome:c.nome,valor:c.valor,cor:c2[c.nome]||cores[i%5]})));
+  drawDonutList('instDonut','instLeg',iv.porInstituicao.map((c,i)=>({nome:c.nome,valor:c.valor,cor:cores[i%5]})));
+  let t='<table class="tbl"><thead><tr><th>Emissor</th><th style="text-align:right">Investido</th><th style="text-align:right">Saldo</th><th style="text-align:right">Rend.</th></tr></thead><tbody>';
+  iv.porEmissor.forEach(e=>{const cl=e.pct<0?'var(--over)':'var(--teal-2)';t+=`<tr><td class="n">${e.nome}</td><td style="text-align:right">R$ ${brl2(e.investido)}</td><td style="text-align:right">R$ ${brl2(e.saldo)}</td><td style="text-align:right;color:${cl}">${e.pct>=0?'+':''}${e.pct.toFixed(1).replace('.',',')}%</td></tr>`;});
+  document.getElementById('emissorTbl').innerHTML=t+'</tbody></table>';}
+
 function build(){
   if(!DADOS.temDados){document.querySelector('.main').innerHTML='<div class="soon"><p style="font-size:32px;margin:0">📥</p><b>Sem dados ainda</b><p>Importe faturas/extratos (aba Importar, aqui embaixo) e clique em Salvar no histórico. Aí o painel ganha vida.</p></div>';return;}
   document.getElementById('pillmes').innerHTML='<span class="dot"></span>'+DADOS.mesAtual;
@@ -387,7 +456,7 @@ function build(){
       const t=el('text',{x:x+30,y:Y(v)-7,'text-anchor':'middle'});t.setAttribute('style','fill:var(--ink);font-size:11px;font-weight:700;font-family:IBM Plex Mono');t.textContent=brl(v);s.appendChild(t);});
     [['Receitas',gx-40],['Despesas',gx+40]].forEach(([n,x])=>{const l=el('text',{x,y:H-9,'text-anchor':'middle'});l.setAttribute('class','mlab');l.textContent=n;s.appendChild(l);});})();
   ranked('saldoconta',DADOS.saldoConta,true);
-  renderContas();
+  renderContas();renderInv();
 }
 document.querySelectorAll('.nav').forEach(b=>b.addEventListener('click',()=>{
   document.querySelectorAll('.nav').forEach(x=>x.classList.remove('active'));b.classList.add('active');
