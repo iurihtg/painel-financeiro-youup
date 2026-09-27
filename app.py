@@ -24,7 +24,28 @@ from contabil import db
 from contabil import painel as _painel
 from contabil import reconciliar
 from contabil import assistente
+from contabil import orcamento as _orc_mod
 import streamlit.components.v1 as components
+
+_MESES_PT = {1: "Janeiro", 2: "Fevereiro", 3: "Março", 4: "Abril", 5: "Maio", 6: "Junho",
+             7: "Julho", 8: "Agosto", 9: "Setembro", 10: "Outubro", 11: "Novembro", 12: "Dezembro"}
+
+
+def _hoje_br():
+    """Data de hoje no fuso do Brasil (o servidor roda em UTC)."""
+    try:
+        from zoneinfo import ZoneInfo
+        return dt.datetime.now(ZoneInfo("America/Sao_Paulo")).date()
+    except Exception:
+        return dt.date.today()
+
+
+def _mes_label(m):
+    try:
+        y, mo = m.split("-")
+        return f"{_MESES_PT[int(mo)]} {y}"
+    except Exception:
+        return m
 
 st.set_page_config(page_title="Painel Financeiro Youup", page_icon="📊", layout="wide")
 
@@ -110,13 +131,14 @@ st.sidebar.divider()
 st.sidebar.markdown(
     "**Como alimentar o sistema:**\n\n"
     "1. **✍️ Lançamentos** → à mão, **por frase** (\"gastei 50 no ifood\") ou importe OFX/PDF/Excel.\n"
-    "2. **🔁 Duplicações** → confirme transferências para não contar o mesmo dinheiro 2x.\n"
-    "3. **⚙️ Cadastros** → categorias, contas/cartões, contas a pagar, investimentos, metas.\n"
-    "4. **🎨 Painel** → veja tudo bonito e atualizado."
+    "2. **📊 Orçamento** → defina o teto de gasto por categoria e veja realizado × planejado.\n"
+    "3. **🔁 Duplicações** → confirme transferências para não contar o mesmo dinheiro 2x.\n"
+    "4. **⚙️ Cadastros** → categorias, contas/cartões, contas a pagar, investimentos, metas.\n"
+    "5. **🎨 Painel** → veja tudo bonito e atualizado."
 )
 
-tab_painel, tab_lanc, tab_dup, tab_cad = st.tabs(
-    ["🎨 Painel", "✍️ Lançamentos", "🔁 Duplicações", "⚙️ Cadastros"])
+tab_painel, tab_lanc, tab_orc, tab_dup, tab_cad = st.tabs(
+    ["🎨 Painel", "✍️ Lançamentos", "📊 Orçamento", "🔁 Duplicações", "⚙️ Cadastros"])
 
 # ═══════════════════════════ 🎨 PAINEL ═══════════════════════════
 with tab_painel:
@@ -124,7 +146,9 @@ with tab_painel:
     _invs = store.get_setting("investimentos", []) or []
     _meta = store.get_setting("meta_patrimonio", 11_000_000)
     _planos = store.get_setting("planos", []) or []
-    _dados = _painel.compute_dados(TX, _contas, _invs, _meta, _planos)
+    _orcamento = store.get_setting("orcamento", {}) or {}
+    _dados = _painel.compute_dados(TX, _contas, _invs, _meta, _planos,
+                                   orcamento=_orcamento, hoje=_hoje_br())
     components.html(_painel.render(_dados), height=920, scrolling=True)
 
 # ═══════════════════════════ ✍️ LANÇAMENTOS ═══════════════════════════
@@ -253,6 +277,102 @@ with tab_lanc:
             st.success(f"{ncat} categoria(s) alterada(s), {ndel} excluído(s).")
             st.rerun()
 
+# ═══════════════════════════ 📊 ORÇAMENTO ═══════════════════════════
+with tab_orc:
+    st.subheader("📊 Planejamento orçamentário")
+    st.caption("Defina um **teto de gasto** por categoria. O sistema compara com o "
+               "realizado do mês e marca 🔴 onde você estourou. Use mín/médio/máximo "
+               "para pôr metas realistas.")
+    _hoje = _hoje_br()
+    _mes_corr = f"{_hoje.year}-{_hoje.month:02d}"
+    _meses = _orc_mod.meses_disponiveis(TX)
+    _op_mes = sorted(set(_meses + [_mes_corr]), reverse=True)
+    _def_mes = _mes_corr if _mes_corr in _op_mes else (_meses[-1] if _meses else _mes_corr)
+    om1, om2 = st.columns([2, 2])
+    _mes_ref = om1.selectbox("Mês de referência", _op_mes,
+                             index=_op_mes.index(_def_mes), format_func=_mes_label)
+    _jan = om2.selectbox("Base do mín/médio/máx", [3, 6, 12],
+                         format_func=lambda n: f"últimos {n} meses")
+    if not TX:
+        st.info("Lance ou importe despesas primeiro — aí o orçamento ganha base de comparação. "
+                "Você pode definir os tetos aqui mesmo assim.")
+    _orc = store.get_setting("orcamento", {}) or {}
+    _linhas, _tot, _jm = _orc_mod.grade(TX, _orc, _mes_ref, _jan)
+    if not _linhas:
+        st.info("Sem categorias de despesa ainda. Cadastre suas categorias em ⚙️ Cadastros "
+                "e faça alguns lançamentos.")
+    else:
+        _dfo = pd.DataFrame([{
+            "Categoria": l["categoria"], "Planejado": l["planejado"],
+            "Realizado": l["realizado"],
+            "Status": ("🔴 estourou" if l["estourou"] else ("✅ ok" if l["planejado"] > 0 else "— sem meta")),
+            "% usado": (f"{int(l['pct'])}%" if l["pct"] is not None else "—"),
+            "Média": l["media"], "Mín": l["min"], "Máx": l["max"],
+        } for l in _linhas])
+        st.caption(f"Mês: **{_mes_label(_mes_ref)}** · edite a coluna **Planejado** e salve.")
+        _ed = st.data_editor(
+            _dfo, hide_index=True, use_container_width=True, height=430, key="orc_editor",
+            disabled=["Categoria", "Realizado", "Status", "% usado", "Média", "Mín", "Máx"],
+            column_config={
+                "Planejado": st.column_config.NumberColumn("Planejado (teto/mês)", format="R$ %.2f",
+                                                           min_value=0.0, step=50.0),
+                "Realizado": st.column_config.NumberColumn(format="R$ %.2f"),
+                "Média": st.column_config.NumberColumn(format="R$ %.2f"),
+                "Mín": st.column_config.NumberColumn(format="R$ %.2f"),
+                "Máx": st.column_config.NumberColumn(format="R$ %.2f"),
+            })
+        _est = [l for l in _linhas if l["estourou"]]
+        k1, k2, k3 = st.columns(3)
+        k1.metric("Planejado no mês", brl(_tot["planejado"]))
+        k2.metric("Realizado no mês", brl(_tot["realizado"]),
+                  delta=brl(_tot["realizado"] - _tot["planejado"]) if _tot["planejado"] else None,
+                  delta_color="inverse")
+        k3.metric("Categorias estouradas", len(_est))
+        if _est:
+            st.warning("🔴 Estourou em: " + " · ".join(
+                f"{l['categoria']} ({brl(l['realizado'])}/{brl(l['planejado'])})" for l in _est[:8]))
+        if st.button("💾 Salvar planejamento", type="primary"):
+            _novo = dict(_orc)
+            for _, r in _ed.iterrows():
+                v = float(r["Planejado"] or 0)
+                if v > 0:
+                    _novo[r["Categoria"]] = round(v, 2)
+                elif r["Categoria"] in _novo:
+                    del _novo[r["Categoria"]]
+            store.set_setting("orcamento", _novo)
+            st.success("Planejamento salvo. O painel (Balanço → 'Gasto do mês × planejado') já usa esses tetos.")
+            st.rerun()
+
+    st.divider()
+    st.subheader("💳 Controle de cartões")
+    _cart_reg = [c.get("nome") for c in (store.get_setting("contas_reg", []) or [])
+                 if c.get("tipo") == "Cartão de crédito" and c.get("nome")]
+    _cartoes, _cmeses, _matriz, _totmes = _orc_mod.cartoes_por_mes(TX, cartoes_reg=_cart_reg)
+    if not _cartoes:
+        st.info("Nenhum gasto em cartão identificado ainda. Dica: cadastre seus cartões em "
+                "⚙️ Cadastros (tipo **Cartão de crédito**) e importe as faturas — aí cada "
+                "cartão aparece aqui com o gasto mês a mês.")
+    else:
+        _rows = []
+        for c in _cartoes:
+            row = {"Cartão": c}
+            for m in _cmeses:
+                row[_mes_label(m).split()[0][:3] + "/" + m[2:4]] = _matriz[c].get(m, 0.0)
+            row["Total"] = round(sum(_matriz[c].values()), 2)
+            _rows.append(row)
+        _tot_row = {"Cartão": "TOTAL"}
+        for m in _cmeses:
+            _tot_row[_mes_label(m).split()[0][:3] + "/" + m[2:4]] = _totmes.get(m, 0.0)
+        _tot_row["Total"] = round(sum(_totmes.values()), 2)
+        _rows.append(_tot_row)
+        _dfc = pd.DataFrame(_rows)
+        _numcols = [c for c in _dfc.columns if c != "Cartão"]
+        st.dataframe(_dfc, hide_index=True, use_container_width=True,
+                     column_config={c: st.column_config.NumberColumn(format="R$ %.2f") for c in _numcols})
+        st.caption("💡 Para melhorar o controle de cartões: cadastre cada cartão em Cadastros "
+                   "(com banco e escopo PF/PJ), e registre o **limite** e o **vencimento** da fatura "
+                   "em ⚙️ Cadastros → Contas a pagar. Assim dá pra alertar antes de estourar o limite.")
+
 # ═══════════════════════════ 🔁 DUPLICAÇÕES ═══════════════════════════
 with tab_dup:
     st.subheader("🔁 Conferência anti-duplicação")
@@ -310,6 +430,7 @@ with tab_cad:
     # ── categorias e subcategorias ──
     st.subheader("🏷️ Categorias e subcategorias")
     st.caption("Crie suas categorias. Subcategorias aparecem no menu como \"Categoria › Sub\".")
+    st.caption("📌 **Exemplo:** categoria _Alimentação_ · subcategorias _Restaurante, Supermercado, iFood_")
     _cats_user = store.get_setting("categorias", []) or []
     with st.form("nova_cat", clear_on_submit=True):
         a, b = st.columns([2, 3])
@@ -340,6 +461,7 @@ with tab_cad:
     # ── contas, cartões e bancos ──
     st.subheader("🏦 Contas, cartões e bancos")
     st.caption("Cadastre suas contas e cartões — eles viram opções no campo \"Conta / origem\".")
+    st.caption("📌 **Exemplo:** _Cartão Nubank_ · tipo _Cartão de crédito_ · banco _Nubank_ · escopo _PF_")
     _contas_reg = store.get_setting("contas_reg", []) or []
     with st.form("nova_contareg", clear_on_submit=True):
         a, b, c, d = st.columns([2, 1.4, 1.4, 1.2])
@@ -368,6 +490,7 @@ with tab_cad:
 
     st.divider()
     st.subheader("📅 Contas a pagar / receber")
+    st.caption("📌 **Exemplo:** _A pagar_ · _Aluguel_ · R$ 2.500 · categoria _Moradia_ · vence _05/10/2026_")
     with st.form("nova_conta", clear_on_submit=True):
         c1, c2, c3 = st.columns([1, 2, 1])
         _tipo = c1.selectbox("Tipo", ["A pagar", "A receber"])
@@ -401,6 +524,7 @@ with tab_cad:
 
     st.divider()
     st.subheader("💰 Investimentos")
+    st.caption("📌 **Exemplo:** _BTG_ · _Renda Fixa_ · ativo _CDB 110% CDI_ · investido R$ 10.000 · saldo R$ 10.850")
     _meta_nova = st.number_input("🎯 Meta de patrimônio (independência financeira)",
                                  min_value=0, value=int(_meta), step=100_000, format="%d")
     if _meta_nova != _meta:
@@ -438,6 +562,8 @@ with tab_cad:
 
     st.divider()
     st.subheader("🎯 Planos & Metas")
+    st.caption("📌 **Exemplo:** _Reserva de emergência_ · _Meta (guardar)_ · total R$ 60.000 · "
+               "já guardado R$ 15.000 · aporte R$ 2.000/mês")
     with st.form("novo_plano", clear_on_submit=True):
         p1, p2 = st.columns([2, 1])
         _pnome = p1.text_input("Nome do plano (ex.: Reserva, Quitar carro, Independência 11mi)")

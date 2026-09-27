@@ -25,17 +25,45 @@ def _mes(d):
     return s[:7] if len(s) >= 7 and s[4] == "-" else None
 
 
-def compute_dados(tx, contas=None, investimentos=None, meta=11_000_000, planos=None):
-    """Transforma os lançamentos reais no dicionário que o painel consome."""
+_DIAS_SEM = ["segunda-feira", "terça-feira", "quarta-feira", "quinta-feira",
+             "sexta-feira", "sábado", "domingo"]
+
+
+def _data_br(d):
+    return f"{_DIAS_SEM[d.weekday()]}, {d.day:02d}/{d.month:02d}/{d.year}"
+
+
+def _to_date(s):
+    try:
+        return datetime.strptime(str(s)[:10], "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return None
+
+
+def compute_dados(tx, contas=None, investimentos=None, meta=11_000_000, planos=None,
+                  orcamento=None, hoje=None):
+    """Transforma os lançamentos reais no dicionário que o painel consome.
+
+    `orcamento`: {categoria: valor_mensal} — teto planejado por categoria.
+    `hoje`     : data real (default date.today()) — usada para vencimentos e para
+                 saber se os dados estão desatualizados em relação ao mês vigente.
+    """
+    hoje = hoje or date.today()
+    orcamento = orcamento or {}
     despesas = [t for t in tx if t.get("tipo") == "Despesa" and float(t.get("saida") or 0) > 0]
     receitas = [t for t in tx if t.get("tipo") == "Receita" and float(t.get("entrada") or 0) > 0]
 
     meses = sorted({m for t in tx if (m := _mes(t.get("data")))})
     if not meses:
-        return {"temDados": False}
+        return {"temDados": False, "hojeStr": _data_br(hoje),
+                "mesCorrente": f"{NOMES_MES[hoje.month]} {hoje.year}"}
     meses12 = meses[-12:]
-    mes_atual = meses[-1]
+    mes_dados = meses[-1]                       # último mês COM dados
+    mes_corrente = f"{hoje.year}-{hoje.month:02d}"  # mês real do calendário
+    # o "mês de referência" é o corrente se houver dados nele; senão o último com dados
+    mes_atual = mes_corrente if mes_corrente in meses else mes_dados
     ano_atual = int(mes_atual[:4])
+    desatualizado = mes_dados < mes_corrente    # tem mês(es) sem lançamentos até hoje
 
     # fluxo mensal
     rec_por_mes = defaultdict(float)
@@ -76,17 +104,23 @@ def compute_dados(tx, contas=None, investimentos=None, meta=11_000_000, planos=N
     catPct = sorted(({"nome": n, "pct": round(v / rec_mes * 100, 1)} for n, v in cat_mes.items()),
                     key=lambda x: -x["pct"])[:8]
 
-    # realizado x "normal" (média dos meses anteriores) — planejado provisório
-    meses_ant = meses[:-1]
+    # realizado x planejado: usa o ORÇAMENTO do usuário quando existe; senão a
+    # média dos meses anteriores (fallback), para o indicador nunca ficar vazio.
+    meses_ant = [m for m in meses if m < mes_atual]
     realizadoPlanejado = []
     for n, real in sorted(cat_mes.items(), key=lambda x: -x[1])[:8]:
-        soma = cont = 0.0
-        for t in despesas:
-            if (t.get("categoria") or "Sem categoria") == n and _mes(t["data"]) in meses_ant:
-                soma += float(t["saida"])
-        media = soma / len(meses_ant) if meses_ant else real
+        orc = float(orcamento.get(n) or 0)
+        if orc > 0:
+            plan = orc
+        else:
+            soma = 0.0
+            for t in despesas:
+                if (t.get("categoria") or "Sem categoria") == n and _mes(t["data"]) in meses_ant:
+                    soma += float(t["saida"])
+            plan = (soma / len(meses_ant)) if meses_ant else real
         realizadoPlanejado.append({"nome": n, "real": round(real, 2),
-                                   "plan": round(media or real, 2)})
+                                   "plan": round(plan or real, 2),
+                                   "temOrc": orc > 0})
 
     # composição das receitas
     rec_cat = defaultdict(float)
@@ -131,15 +165,24 @@ def compute_dados(tx, contas=None, investimentos=None, meta=11_000_000, planos=N
         return (s[8:10] + "/" + s[5:7]) if len(s) >= 10 else s
 
     def _item(c):
+        vd = _to_date(c.get("venc"))
+        dias = (vd - hoje).days if vd else None      # <0 = vencida, 0 = hoje
         return {"data": _fmt_venc(c.get("venc")), "nome": c.get("desc") or c.get("cat") or "Conta",
-                "cat": c.get("cat") or "", "valor": round(float(c.get("valor") or 0), 2)}
+                "cat": c.get("cat") or "", "valor": round(float(c.get("valor") or 0), 2),
+                "dias": dias, "atrasada": (dias is not None and dias < 0),
+                "hoje": (dias == 0)}
     pend = [c for c in contas if c.get("status", "pendente") == "pendente"]
+    # ordena por vencimento — vencidas primeiro
     pagar = sorted([c for c in pend if c.get("tipo") == "pagar"], key=lambda c: str(c.get("venc", "")))
     receber = sorted([c for c in pend if c.get("tipo") == "receber"], key=lambda c: str(c.get("venc", "")))
+    pagar_i = [_item(c) for c in pagar]
+    receber_i = [_item(c) for c in receber]
     contas_d = {
-        "pagar": [_item(c) for c in pagar], "receber": [_item(c) for c in receber],
+        "pagar": pagar_i, "receber": receber_i,
         "totalPagar": round(sum(float(c.get("valor") or 0) for c in pagar), 2),
         "totalReceber": round(sum(float(c.get("valor") or 0) for c in receber), 2),
+        "vencidasPagar": round(sum(x["valor"] for x in pagar_i if x["atrasada"]), 2),
+        "nVencidasPagar": sum(1 for x in pagar_i if x["atrasada"]),
     }
 
     # investimentos (JSON em settings)
@@ -199,6 +242,9 @@ def compute_dados(tx, contas=None, investimentos=None, meta=11_000_000, planos=N
     return {
         "temDados": True,
         "mesAtual": f"{NOMES_MES[int(mes_atual[5:7])]} {ano_atual}",
+        "mesDados": f"{NOMES_MES[int(mes_dados[5:7])]} {int(mes_dados[:4])}",
+        "mesCorrente": f"{NOMES_MES[hoje.month]} {hoje.year}",
+        "hojeStr": _data_br(hoje), "desatualizado": desatualizado,
         "ano": ano_atual, "kpis": kpis, "fluxo": fluxo,
         "realizadoPlanejado": realizadoPlanejado, "catPct": catPct, "cartoes": cartoes,
         "rankDespesa": rankDespesa, "composicaoReceita": composicaoReceita,
@@ -281,6 +327,9 @@ svg{display:block;width:100%;height:auto}.axis{fill:var(--muted);font-size:10px;
 .pend .nm{flex:1;min-width:0;font-size:13px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pend .nm small{display:block;color:var(--muted);font-size:11px;font-weight:400}
 .pend .am{font-family:"IBM Plex Mono",monospace;font-weight:600;font-size:13px}
 .empty{color:var(--muted);font-size:13px;text-align:center;padding:30px 10px}
+.stale{background:var(--orange-soft);border:1px solid var(--orange);color:var(--ink);border-radius:11px;padding:9px 13px;font-size:12.5px;margin-bottom:12px}
+.pend .it.late .nm{color:var(--over)}.pend .it .tag-late{font-size:10px;font-weight:700;color:#fff;background:var(--over);border-radius:5px;padding:1px 6px;margin-left:6px}
+.pend .it .tag-soon{font-size:10px;font-weight:600;color:var(--orange-2);background:var(--orange-soft);border-radius:5px;padding:1px 6px;margin-left:6px}
 .invhero{background:linear-gradient(135deg,var(--teal-2),var(--teal));border-radius:var(--r);padding:18px 20px;color:#fff;box-shadow:var(--shadow);display:grid;grid-template-columns:1.3fr 1fr 1fr;gap:16px;align-items:center}
 .invhero .big{font-family:"Bricolage Grotesque";font-weight:700;font-size:36px;line-height:1;letter-spacing:-.02em}
 .invhero .l{font-size:11px;text-transform:uppercase;letter-spacing:.05em;opacity:.85}
@@ -311,7 +360,10 @@ svg{display:block;width:100%;height:auto}.axis{fill:var(--muted);font-size:10px;
     <button class="nav" data-view="inv"><span class="ic">💰</span>Investimentos</button>
   </aside>
   <main class="main">
-    <div class="top"><h1 id="vtitle">Balanço Mensal</h1><span class="pill" id="pillmes"><span class="dot"></span>—</span></div>
+    <div class="top"><h1 id="vtitle">Balanço Mensal</h1>
+      <span class="pill" id="pillhoje" title="data de hoje">📅 —</span>
+      <span class="pill" id="pillmes"><span class="dot"></span>—</span></div>
+    <div id="stalewarn"></div>
 
     <section class="view" data-v="dash">
       <div class="kpis" id="kpis"></div>
@@ -319,7 +371,7 @@ svg{display:block;width:100%;height:auto}.axis{fill:var(--muted);font-size:10px;
         <div class="card"><div class="hd"><h3>Receitas e Despesas</h3><span class="hint" id="anoLbl"></span></div>
           <svg id="area" viewBox="0 0 560 240"></svg>
           <div class="legend"><span><i style="background:var(--teal)"></i>Receitas</span><span><i style="background:var(--orange)"></i>Despesas</span></div></div>
-        <div class="card"><div class="hd"><h3>Gasto do mês × sua média</h3></div><div class="rp"><div class="list" id="rplist"></div>
+        <div class="card"><div class="hd"><h3>Gasto do mês × planejado</h3><span class="hint">meta ou média</span></div><div class="rp"><div class="list" id="rplist"></div>
           <div class="donutwrap"><svg id="donut" viewBox="0 0 130 130"></svg><div class="cap">do seu normal</div></div></div></div>
       </div>
       <div class="grid2">
@@ -418,16 +470,19 @@ function ranked(id,items,teal){const h=document.getElementById(id);if(!h)return;
     h.appendChild(row);tip(row,`${x.nome}<br>R$ ${brl2(x.valor)}`);});}
 
 function renderContas(){const c=DADOS.contas||{pagar:[],receber:[],totalPagar:0,totalReceber:0},sp=c.totalReceber-c.totalPagar;
+  const venc=c.vencidasPagar||0,nv=c.nVencidasPagar||0;
   document.getElementById('ckpis').innerHTML=
-   `<div class="kpi d"><div class="ico">⏳</div><div><div class="lbl">A pagar</div><div class="val neg"><span class="c">R$</span>${brl2(c.totalPagar)}</div></div></div>
+   `<div class="kpi d"><div class="ico">${nv?'🔴':'⏳'}</div><div><div class="lbl">A pagar${nv?' · '+nv+' vencida(s)':''}</div><div class="val neg"><span class="c">R$</span>${brl2(c.totalPagar)}</div>${nv?'<div style="font-size:11px;color:var(--over);font-weight:600;margin-top:2px">R$ '+brl2(venc)+' já vencido</div>':''}</div></div>
     <div class="kpi r"><div class="ico">📥</div><div><div class="lbl">A receber</div><div class="val pos"><span class="c">R$</span>${brl2(c.totalReceber)}</div></div></div>
     <div class="kpi s"><div class="ico">${sp>=0?'✓':'!'}</div><div><div class="lbl">Saldo previsto</div><div class="val ${sp>=0?'pos':'neg'}"><span class="c">R$</span>${brl2(sp)}</div></div></div>`;
   drawPend('pagar');}
+function _diasTxt(x){if(x.dias==null)return '';if(x.atrasada)return '<span class="tag-late">venceu há '+(-x.dias)+'d</span>';
+  if(x.hoje)return '<span class="tag-late">vence hoje</span>';if(x.dias<=7)return '<span class="tag-soon">em '+x.dias+'d</span>';return '';}
 function drawPend(tp){const h=document.getElementById('pendlist');if(!h)return;h.innerHTML='';const arr=(DADOS.contas||{})[tp]||[];
   if(!arr.length){h.innerHTML='<div class="empty">Nada pendente aqui. Cadastre logo abaixo do painel. 🎉</div>';return;}
   let day='';arr.forEach(x=>{if(x.data!==day){day=x.data;const d=document.createElement('div');d.className='day';d.textContent=x.data;h.appendChild(d);}
-    const it=document.createElement('div');it.className='it';const pos=tp==='receber';
-    it.innerHTML=`<div class="nm">${x.nome}<small>${x.cat}</small></div><div class="am ${pos?'pos':'neg'}">${pos?'+':'−'}${brl2(x.valor)}</div>`;h.appendChild(it);});}
+    const it=document.createElement('div');it.className='it'+(tp==='pagar'&&x.atrasada?' late':'');const pos=tp==='receber';
+    it.innerHTML=`<div class="nm">${x.nome}${tp==='pagar'?_diasTxt(x):''}<small>${x.cat}</small></div><div class="am ${pos?'pos':'neg'}">${pos?'+':'−'}${brl2(x.valor)}</div>`;h.appendChild(it);});}
 
 function drawDonutList(svgId,legId,items){const s=document.getElementById(svgId);if(!s)return;s.innerHTML='';const cx=70,cy=70,r=50,C=2*Math.PI*r;let off=0;
   const tt=items.reduce((a,b)=>a+b.valor,0)||1;
@@ -464,6 +519,9 @@ function renderPlanos(){const pl=DADOS.planos;
 function build(){
   if(!DADOS.temDados){document.querySelector('.main').innerHTML='<div class="soon"><p style="font-size:32px;margin:0">📥</p><b>Sem dados ainda</b><p>Importe faturas/extratos (aba Importar, aqui embaixo) e clique em Salvar no histórico. Aí o painel ganha vida.</p></div>';return;}
   document.getElementById('pillmes').innerHTML='<span class="dot"></span>'+DADOS.mesAtual;
+  const ph=document.getElementById('pillhoje');if(ph&&DADOS.hojeStr)ph.textContent='📅 hoje: '+DADOS.hojeStr;
+  const sw=document.getElementById('stalewarn');
+  if(sw&&DADOS.desatualizado){sw.innerHTML='<div class="stale">⚠️ Você ainda não importou lançamentos de <b>'+DADOS.mesCorrente+'</b>. O balanço abaixo mostra <b>'+DADOS.mesDados+'</b> (último mês com dados). Importe o extrato do mês em <b>✍️ Lançamentos</b>.</div>';}
   document.getElementById('anoLbl').textContent=DADOS.ano;
   const k=DADOS.kpis,kc=document.getElementById('kpis');
   kc.innerHTML=`<div class="kpi r"><div class="ico">↘</div><div><div class="lbl">Receitas</div><div class="val"><span class="c">R$</span>${brl2(k.receita)}</div></div></div>
@@ -475,7 +533,7 @@ function build(){
   DADOS.realizadoPlanejado.forEach(x=>{tr+=x.real;tp+=x.plan;const pc=x.plan>0?Math.round(x.real/x.plan*100):100,o=pc>110;
     const row=document.createElement('div');row.className='row';
     row.innerHTML=`<div class="nm">${x.nome}</div><div class="vv">${brl(x.real)}</div><div class="bar"><i class="${o?'over':''}" style="width:${Math.min(pc,100)}%"></i></div><div class="pc ${o?'over':''}">${pc}%</div>`;rl.appendChild(row);
-    tip(row,`${x.nome}<br>Gasto: R$ ${brl2(x.real)} · sua média: R$ ${brl2(x.plan)}`);});
+    tip(row,`${x.nome}<br>Gasto: R$ ${brl2(x.real)} · ${x.temOrc?'planejado':'média'}: R$ ${brl2(x.plan)}`);});
   const pct=tp>0?Math.round(tr/tp*100):100;donut(document.getElementById('donut'),65,65,48,15,pct,pct>110?'var(--over)':'var(--orange)',pct+'%','vs média',`Você gastou ${pct}% da sua média`);
   // % por categoria
   (function(){const s=document.getElementById('catbars'),cats=DADOS.catPct,W=560,H=220,ml=8,mr=8,mt=18,mb=52,pW=W-ml-mr,pH=H-mt-mb;
