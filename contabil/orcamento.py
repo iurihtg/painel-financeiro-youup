@@ -31,10 +31,11 @@ def _mes_abr(m):
 
 
 def _split(cat):
-    """'Grupo › Sub' -> ('Grupo','Sub'); 'Categoria' -> ('Categoria', None)."""
+    """'Grupo › Sub' ou 'Grupo/Sub' -> ('Grupo','Sub'); senão ('Categoria', None).
+    Serve para o agrupamento AUTOMÁTICO (mãe/filha) a partir do nome da categoria."""
     c = str(cat or "").strip()
     for sep in ("›", ">", "/"):
-        if sep in c and sep != "/":
+        if sep in c:
             g, s = c.split(sep, 1)
             return g.strip(), s.strip()
     return c, None
@@ -197,18 +198,9 @@ def montar_planejamento(tx, orcamento, cat_grupo=None, hoje=None, janela=3, n_me
     def realizado(cat, m):
         return round(agg.get(("Despesa", cat, m), 0.0) + agg.get(("Receita", cat, m), 0.0), 2)
 
-    _rec_leaves = [c for c in folhas if _tipo_leaf(c, presentes) == "Receita"]
-    tot_rec_plan = sum(float(orcamento.get(c) or 0) for c in _rec_leaves)
-    if tot_rec_plan > 0:
-        base_pct = tot_rec_plan
-    else:
-        # sem meta de receita: usa a média mensal realizada de receita como base do %
-        _rv = [sum(realizado(c, m) for c in _rec_leaves) for m in meses_show]
-        _rv = [v for v in _rv if v > 0]
-        base_pct = (sum(_rv) / len(_rv)) if _rv else 0.0
-
-    def _pct(plan):
-        return round(plan / base_pct * 100, 1) if base_pct > 0 else 0.0
+    # mês de referência p/ o % (mais recente com dados)
+    ref_m = win[-1] if win else (meses_all[-1] if meses_all else None)
+    ref_idx = meses_show.index(ref_m) if ref_m in meses_show else None
 
     def _row(nome, cat, membros, tipoLinha):
         plan = round(sum(float(orcamento.get(c) or 0) for c in membros), 2)
@@ -217,7 +209,7 @@ def montar_planejamento(tx, orcamento, cat_grupo=None, hoje=None, janela=3, n_me
             r = round(sum(realizado(c, m) for c in membros), 2)
             meses_v.append({"m": _mes_abr(m), "val": r, "over": (plan > 0 and r > plan)})
         mn, md, mx = _mmm([sum(realizado(c, m) for c in membros) for m in win])
-        return {"nome": nome, "cat": cat, "plan": plan, "pct": _pct(plan),
+        return {"nome": nome, "cat": cat, "plan": plan, "pct": 0.0,
                 "min": mn, "med": md, "max": mx, "meses": meses_v, "tipoLinha": tipoLinha}
 
     def _secao(tipo):
@@ -258,6 +250,24 @@ def montar_planejamento(tx, orcamento, cat_grupo=None, hoje=None, janela=3, n_me
 
     receita = _secao("Receita")
     despesa = _secao("Despesa")
+
+    # % = fatia da categoria no total da SEÇÃO (planejado se houver meta, senão realizado do mês ref)
+    def _fill_pct(sec):
+        plan_total = sec["plan"]
+        if plan_total > 0:
+            base = plan_total
+            def getv(r):
+                return r["plan"] or 0
+        else:
+            base = sec["meses"][ref_idx]["val"] if ref_idx is not None else 0
+            def getv(r):
+                return r["meses"][ref_idx]["val"] if ref_idx is not None else 0
+        sec["pct"] = round(getv(sec) / base * 100, 1) if base > 0 else 0.0
+        for r in sec["linhas"]:
+            r["pct"] = round(getv(r) / base * 100, 1) if base > 0 else 0.0
+    _fill_pct(receita)
+    _fill_pct(despesa)
+
     saldo = [round(receita["meses"][i]["val"] - despesa["meses"][i]["val"], 2)
              for i in range(len(meses_show))]
 

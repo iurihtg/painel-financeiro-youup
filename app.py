@@ -295,79 +295,150 @@ with tab_orc:
     else:
         _rows = _pd["rows"]
         _mcols = _pd["meses"]
-        # monta o DataFrame da planilha editável
-        _recs = []
+        # índices dos meses com dados (some coluna vazia do mês atual)
+        _kidx = [i for i in range(len(_mcols)) if any(r["meses"][i]["val"] for r in _rows)]
+        _mlabels = [_mcols[i] for i in _kidx]
+        # tipo por linha (marca receita/despesa nas seções, p/ cor)
+        _recs, _sec_atual = [], None
         for r in _rows:
-            base = {"_tipo": r["tipoLinha"], "_cat": r.get("cat") or ""}
-            ind = "     ↳ " if r["tipoLinha"] == "sub" else ("" if r["tipoLinha"] in ("leaf",) else "")
+            tl = r["tipoLinha"]
+            if tl == "sec":
+                _sec_atual = "Receita" if _sec_atual is None else "Despesa"
+                _t = "sec-rec" if _sec_atual == "Receita" else "sec-desp"
+            else:
+                _t = tl
             nome = r["nome"]
-            if r["tipoLinha"] == "sec":
-                nome = ("▸ " + nome.upper())
-            elif r["tipoLinha"] == "saldo":
-                nome = "＝ " + nome
-            elif r["tipoLinha"] == "grupo":
+            if tl == "sec":
+                nome = nome.upper()
+            elif tl == "grupo":
                 nome = "▸ " + nome
-            elif r["tipoLinha"] == "sub":
-                nome = ind + nome
-            base["Categorias e Subcategorias"] = nome
-            base["Planejamento"] = (None if r["plan"] in (None, 0, 0.0) else float(r["plan"]))
-            base["%"] = ("" if not r.get("pct") else f"{r['pct']:.1f}".replace(".", ",") + "%")
-            base["Mín"] = (None if not r.get("min") else float(r["min"]))
-            base["Méd"] = (None if not r.get("med") else float(r["med"]))
-            base["Máx"] = (None if not r.get("max") else float(r["max"]))
-            _est = 0
-            for i, mc in enumerate(_mcols):
-                mv = r["meses"][i]
-                base[mc] = (float(mv["val"]) if mv["val"] else None)
-                if mv.get("over"):
-                    _est += 1
-            base["⚠"] = ("🔴" if _est else ("" if r["tipoLinha"] in ("sec", "saldo", "grupo")
-                                            else ("✅" if r["plan"] else "")))
-            _recs.append(base)
+            rec = {"_tipo": _t, "_cat": r.get("cat") or "",
+                   "nome": nome,
+                   "plan": (None if not r.get("plan") else float(r["plan"])),
+                   "pct": ("" if not r.get("pct") else f"{r['pct']:.1f}".replace(".", ",") + "%"),
+                   "min": (None if not r.get("min") else float(r["min"])),
+                   "med": (None if not r.get("med") else float(r["med"])),
+                   "max": (None if not r.get("max") else float(r["max"]))}
+            for j, i in enumerate(_kidx):
+                rec[f"m{j}"] = (float(r["meses"][i]["val"]) if r["meses"][i]["val"] else None)
+                rec[f"o{j}"] = bool(r["meses"][i].get("over"))
+            _recs.append(rec)
         _dfp = pd.DataFrame(_recs)
-        for _nc in ["Planejamento", "Mín", "Méd", "Máx"] + list(_mcols):
-            _dfp[_nc] = pd.to_numeric(_dfp[_nc], errors="coerce")
-        # esconde colunas de mês totalmente vazias (ex.: mês atual sem lançamentos)
-        _mcols_show = [mc for mc in _mcols if _dfp[mc].notna().any()]
-        _fixas = ["_tipo", "_cat", "Categorias e Subcategorias", "Planejamento", "%",
-                  "Mín", "Méd", "Máx", "⚠"]
-        _dfp = _dfp[[c for c in _fixas if c in _dfp.columns] + _mcols_show]
-        _editable = ["Planejamento"]
-        _disabled = [c for c in _dfp.columns if c not in _editable and not c.startswith("_")]
-        _colcfg = {"_tipo": None, "_cat": None,
-                   "Categorias e Subcategorias": st.column_config.TextColumn(width="medium"),
-                   "Planejamento": st.column_config.NumberColumn("✏️ Planejamento", format="R$ %.0f",
-                                                                 min_value=0.0, step=50.0),
-                   "%": st.column_config.TextColumn(width="small"),
-                   "Mín": st.column_config.NumberColumn(format="R$ %.0f"),
-                   "Méd": st.column_config.NumberColumn(format="R$ %.0f"),
-                   "Máx": st.column_config.NumberColumn(format="R$ %.0f"),
-                   "⚠": st.column_config.TextColumn("⚠", width="small")}
-        for mc in _mcols_show:
-            _colcfg[mc] = st.column_config.NumberColumn(format="R$ %.0f")
-        st.caption("Edite só as linhas de **categoria/subcategoria** (as linhas de grupo e de seção "
-                   "somam sozinhas). 🔴 = estourou algum mês · ✅ = dentro do teto. Role para o lado → mais meses.")
-        _hp = min(700, 44 + len(_dfp) * 36)
-        _edp = st.data_editor(_dfp, hide_index=True, use_container_width=True, height=_hp,
-                              key="orc_planilha", disabled=_disabled, column_config=_colcfg)
-        if st.button("💾 Salvar planejamento", type="primary"):
-            _novo = dict(_orc)
-            for i, r in _edp.iterrows():
-                if r["_tipo"] not in ("leaf", "sub"):
-                    continue
-                cat = r["_cat"]
-                v = float(r["Planejamento"] or 0)
-                if v > 0:
-                    _novo[cat] = round(v, 2)
-                elif cat in _novo:
-                    del _novo[cat]
-            store.set_setting("orcamento", _novo)
-            st.success("Planejamento salvo. A planilha, a visão colorida e o painel já usam esses tetos.")
-            st.rerun()
 
-        with st.expander("🎨 Ver planilha colorida (mês a mês, com vermelho no que estourou)"):
-            _alt = min(900, 170 + len(_rows) * 32)
-            components.html(_orc_mod.render_planejamento(_pd), height=_alt, scrolling=True)
+        st.caption("Edite o **Planejamento** nas linhas de categoria/subcategoria (as linhas de "
+                   "**grupo** e **seção** somam sozinhas). Meses em **vermelho** = passou do planejado. "
+                   "Role para o lado → mais meses.")
+
+        _saved = False
+        try:
+            from st_aggrid import AgGrid, GridOptionsBuilder, JsCode, GridUpdateMode
+            _brl = JsCode("function(p){if(p.value==null||p.value===''||isNaN(p.value))return '';"
+                          "return 'R$ '+Number(p.value).toLocaleString('pt-BR',{maximumFractionDigits:0});}")
+            _rowstyle = JsCode("""function(p){var t=p.data._tipo;
+                if(t==='sec-rec')return{background:'#1ba99b',color:'white',fontWeight:'700'};
+                if(t==='sec-desp')return{background:'#f0873c',color:'white',fontWeight:'700'};
+                if(t==='saldo')return{background:'#e9eef1',fontWeight:'700'};
+                if(t==='grupo')return{background:'#eef3f5',fontWeight:'600'};
+                return null;}""")
+            _editable = JsCode("function(p){return p.data._tipo==='leaf'||p.data._tipo==='sub';}")
+            _planstyle = JsCode("""function(p){var s={textAlign:'right'};
+                if(p.data._tipo==='leaf'||p.data._tipo==='sub'){s.backgroundColor='rgba(27,169,155,.10)';s.cursor='text';}
+                return s;}""")
+            _namestyle = JsCode("""function(p){var t=p.data._tipo,s={};
+                if(t==='sub'){s.paddingLeft='26px';s.color='#5a6b74';}
+                if(t==='sec-rec'||t==='sec-desp')s.color='white';
+                return s;}""")
+
+            gb = GridOptionsBuilder.from_dataframe(_dfp)
+            gb.configure_default_column(editable=False, sortable=False, filter=False,
+                                        resizable=True, suppressMenu=True, menuTabs=[],
+                                        suppressHeaderMenuButton=True)
+            gb.configure_grid_options(getRowStyle=_rowstyle, suppressMovableColumns=True,
+                                      headerHeight=34, rowHeight=32)
+            for h in ("_tipo", "_cat"):
+                gb.configure_column(h, hide=True)
+            for j in range(len(_kidx)):
+                gb.configure_column(f"o{j}", hide=True)
+            gb.configure_column("nome", headerName="Categorias e Subcategorias", pinned="left",
+                                width=230, cellStyle=_namestyle)
+            gb.configure_column("plan", headerName="✏️ Planejamento", editable=_editable,
+                                valueFormatter=_brl, cellStyle=_planstyle, width=140,
+                                type=["numericColumn"])
+            gb.configure_column("pct", headerName="%", width=70,
+                                cellStyle={"textAlign": "right", "color": "#6a7a85"})
+            for c, hn in (("min", "Mín"), ("med", "Méd"), ("max", "Máx")):
+                gb.configure_column(c, headerName=hn, valueFormatter=_brl, width=95,
+                                    cellStyle={"textAlign": "right"})
+            for j, lab in enumerate(_mlabels):
+                cs = JsCode("function(p){var s={textAlign:'right'};"
+                            "if(p.data['o%d']&&p.data._tipo!=='sec-rec'&&p.data._tipo!=='sec-desp'){"
+                            "s.color='#d64533';s.fontWeight='700';}return s;}" % j)
+                gb.configure_column(f"m{j}", headerName=lab, valueFormatter=_brl,
+                                    cellStyle=cs, width=95)
+            _go = gb.build()
+            for _cd in _go.get("columnDefs", []):
+                _cd["suppressMenu"] = True
+                _cd["filter"] = False
+                _cd["sortable"] = False
+                _cd["menuTabs"] = []
+                _cd["suppressHeaderMenuButton"] = True
+            _h = min(760, 70 + len(_dfp) * 32)
+            _grid = AgGrid(_dfp, gridOptions=_go, allow_unsafe_jscode=True,
+                           update_mode=GridUpdateMode.VALUE_CHANGED, height=_h,
+                           theme="streamlit", fit_columns_on_grid_load=False,
+                           key="orc_aggrid")
+            if st.button("💾 Salvar planejamento", type="primary"):
+                _data = _grid["data"]
+                _novo = dict(_orc)
+                for _, rr in pd.DataFrame(_data).iterrows():
+                    if rr["_tipo"] not in ("leaf", "sub"):
+                        continue
+                    cat = rr["_cat"]
+                    try:
+                        v = float(rr["plan"] or 0)
+                    except (ValueError, TypeError):
+                        v = 0
+                    if v > 0:
+                        _novo[cat] = round(v, 2)
+                    elif cat in _novo:
+                        del _novo[cat]
+                store.set_setting("orcamento", _novo)
+                st.success("Planejamento salvo. A planilha e o painel já usam esses tetos.")
+                st.rerun()
+            _saved = True
+        except Exception as _e:  # fallback: tabela simples se a AgGrid falhar
+            st.caption(f"_(grade avançada indisponível: {_e}; usando a tabela simples)_")
+
+        if not _saved:
+            _df2 = _dfp.rename(columns={"nome": "Categorias e Subcategorias", "plan": "Planejamento",
+                                        "pct": "%", "min": "Mín", "med": "Méd", "max": "Máx"})
+            _mren = {f"m{j}": _mlabels[j] for j in range(len(_mlabels))}
+            _df2 = _df2.rename(columns=_mren)
+            _dropo = [f"o{j}" for j in range(len(_kidx))]
+            _df2 = _df2.drop(columns=[c for c in _dropo if c in _df2.columns])
+            _cfg = {"_tipo": None, "_cat": None,
+                    "Planejamento": st.column_config.NumberColumn("✏️ Planejamento", format="R$ %.0f"),
+                    "Mín": st.column_config.NumberColumn(format="R$ %.0f"),
+                    "Méd": st.column_config.NumberColumn(format="R$ %.0f"),
+                    "Máx": st.column_config.NumberColumn(format="R$ %.0f")}
+            for lab in _mlabels:
+                _cfg[lab] = st.column_config.NumberColumn(format="R$ %.0f")
+            _dis = [c for c in _df2.columns if c not in ("Planejamento",) and not c.startswith("_")]
+            _ed2 = st.data_editor(_df2, hide_index=True, use_container_width=True,
+                                  disabled=_dis, column_config=_cfg, key="orc_fallback",
+                                  height=min(700, 44 + len(_df2) * 36))
+            if st.button("💾 Salvar planejamento", type="primary", key="save_fb"):
+                _novo = dict(_orc)
+                for _, rr in _ed2.iterrows():
+                    if rr["_tipo"] in ("leaf", "sub"):
+                        v = float(rr["Planejamento"] or 0)
+                        if v > 0:
+                            _novo[rr["_cat"]] = round(v, 2)
+                        elif rr["_cat"] in _novo:
+                            del _novo[rr["_cat"]]
+                store.set_setting("orcamento", _novo)
+                st.success("Planejamento salvo.")
+                st.rerun()
 
     st.divider()
     st.subheader("💳 Controle de cartões")
