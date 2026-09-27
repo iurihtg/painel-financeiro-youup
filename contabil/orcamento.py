@@ -9,8 +9,11 @@ ajudar a definir metas factíveis.
 
 O orçamento fica em `settings["orcamento"]` = {categoria: valor_mensal}.
 """
-from collections import defaultdict
+import json
+from collections import defaultdict, OrderedDict
 from datetime import date, datetime
+
+_ABR = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"]
 
 
 def _mes(d):
@@ -18,6 +21,23 @@ def _mes(d):
         return f"{d.year}-{d.month:02d}"
     s = str(d or "")
     return s[:7] if len(s) >= 7 and s[4] == "-" else None
+
+
+def _mes_abr(m):
+    try:
+        return f"{_ABR[int(m[5:7]) - 1]}/{m[2:4]}"
+    except Exception:
+        return m
+
+
+def _split(cat):
+    """'Grupo › Sub' -> ('Grupo','Sub'); 'Categoria' -> ('Categoria', None)."""
+    c = str(cat or "").strip()
+    for sep in ("›", ">", "/"):
+        if sep in c and sep != "/":
+            g, s = c.split(sep, 1)
+            return g.strip(), s.strip()
+    return c, None
 
 
 def meses_disponiveis(tx):
@@ -108,3 +128,217 @@ def cartoes_por_mes(tx, meses=None, cartoes_reg=None):
     tot_mes = {m: round(sum(mat[c].get(m, 0) for c in cartoes), 2) for m in meses}
     matriz = {c: {m: round(mat[c].get(m, 0), 2) for m in meses} for c in cartoes}
     return cartoes, meses, matriz, tot_mes
+
+
+# ═══════════════════════ planilha de planejamento (estilo Meu Planner) ═══════════════════════
+def _agg(tx):
+    """(tipo, categoria, mes) -> valor realizado."""
+    agg = defaultdict(float)
+    for t in tx:
+        m = _mes(t.get("data"))
+        if not m:
+            continue
+        if t.get("tipo") == "Despesa" and float(t.get("saida") or 0) > 0:
+            agg[("Despesa", t.get("categoria") or "Sem categoria", m)] += float(t["saida"])
+        elif t.get("tipo") == "Receita" and float(t.get("entrada") or 0) > 0:
+            agg[("Receita", t.get("categoria") or "Sem categoria", m)] += float(t["entrada"])
+    return agg
+
+
+def _mmm(valores):
+    """min/méd/máx dos meses COM gasto (ignora zeros); (0,0,0) se vazio."""
+    v = [x for x in valores if x > 0]
+    if not v:
+        return 0.0, 0.0, 0.0
+    return round(min(v), 2), round(sum(v) / len(v), 2), round(max(v), 2)
+
+
+def _tipo_leaf(label, presentes):
+    if label in presentes:
+        return presentes[label]
+    return "Receita" if "receita" in label.lower() else "Despesa"
+
+
+def montar_planejamento(tx, orcamento, hoje=None, janela=3, n_meses=6):
+    """Monta a estrutura da planilha: seções Receitas/Despesas, grupos (categoria)
+    com subcategorias, colunas de meses (realizado) e mín/méd/máx da janela."""
+    hoje = hoje or date.today()
+    orcamento = orcamento or {}
+    agg = _agg(tx)
+    meses_all = sorted({m for (_, _, m) in agg})
+    mes_ref = f"{hoje.year}-{hoje.month:02d}"
+    if mes_ref not in meses_all:
+        meses_all_ref = meses_all + [mes_ref]
+    else:
+        meses_all_ref = meses_all
+    meses_show = sorted(set(meses_all_ref))[-n_meses:]
+    win = [m for m in meses_all if m <= mes_ref][-janela:]
+
+    # tipo de cada categoria presente
+    presentes = {}
+    for (tp, cat, _m) in agg:
+        presentes.setdefault(cat, tp)
+    # todas as folhas (categorias completas), inclui as que só têm orçamento
+    folhas = set(presentes) | set(orcamento)
+
+    def realizado(cat, m):
+        return round(agg.get(("Despesa", cat, m), 0.0) + agg.get(("Receita", cat, m), 0.0), 2)
+
+    # total de receita planejada (base do %)
+    tot_rec_plan = sum(float(orcamento.get(c) or 0) for c in folhas
+                       if _tipo_leaf(c, presentes) == "Receita") or 0.0
+
+    def _linha(cat, nome_exibir):
+        plan = round(float(orcamento.get(cat) or 0), 2)
+        meses_v = []
+        for m in meses_show:
+            r = realizado(cat, m)
+            meses_v.append({"m": _mes_abr(m), "val": r, "over": (plan > 0 and r > plan)})
+        mn, md, mx = _mmm([realizado(cat, m) for m in win])
+        pct = round(plan / tot_rec_plan * 100, 1) if tot_rec_plan > 0 else 0.0
+        return {"nome": nome_exibir, "cat": cat, "plan": plan, "pct": pct,
+                "min": mn, "med": md, "max": mx, "meses": meses_v}
+
+    def _secao(tipo):
+        leaves = [c for c in folhas if _tipo_leaf(c, presentes) == tipo]
+        # agrupa por grupo (parte antes do ›)
+        grupos = OrderedDict()
+        for leaf in leaves:
+            g, s = _split(leaf)
+            grupos.setdefault(g, {"self": None, "subs": []})
+            if s:
+                grupos[g]["subs"].append(leaf)
+            else:
+                grupos[g]["self"] = leaf
+        # ordena grupos por gasto total desc
+        def _gtot(g):
+            info = grupos[g]
+            cats = list(info["subs"]) + ([info["self"]] if info["self"] else [])
+            return sum(realizado(c, m) for c in cats for m in meses_show)
+        linhas = []
+        for g in sorted(grupos, key=_gtot, reverse=True):
+            info = grupos[g]
+            subs = sorted(info["subs"])
+            if not subs and info["self"]:
+                # categoria simples: uma linha só (grupo)
+                row = _linha(info["self"], g)
+                row["tipoLinha"] = "grupo"
+                linhas.append(row)
+            else:
+                # grupo com subcategorias: linha-grupo = soma das subs (+ self)
+                membros = list(subs) + ([info["self"]] if info["self"] else [])
+                plan = round(sum(float(orcamento.get(c) or 0) for c in membros), 2)
+                meses_v = []
+                for m in meses_show:
+                    r = round(sum(realizado(c, m) for c in membros), 2)
+                    meses_v.append({"m": _mes_abr(m), "val": r, "over": (plan > 0 and r > plan)})
+                mn, md, mx = _mmm([sum(realizado(c, m) for c in membros) for m in win])
+                pct = round(plan / tot_rec_plan * 100, 1) if tot_rec_plan > 0 else 0.0
+                linhas.append({"nome": g, "cat": None, "plan": plan, "pct": pct,
+                               "min": mn, "med": md, "max": mx, "meses": meses_v,
+                               "tipoLinha": "grupo"})
+                if info["self"]:
+                    r = _linha(info["self"], "(geral)")
+                    r["tipoLinha"] = "sub"
+                    linhas.append(r)
+                for leaf in subs:
+                    _g, s = _split(leaf)
+                    r = _linha(leaf, s or leaf)
+                    r["tipoLinha"] = "sub"
+                    linhas.append(r)
+        # total da seção
+        plan_tot = round(sum(float(orcamento.get(c) or 0) for c in leaves), 2)
+        meses_tot = []
+        for m in meses_show:
+            meses_tot.append(round(sum(realizado(c, m) for c in leaves), 2))
+        return {"linhas": linhas, "planTotal": plan_tot, "mesesTotal": meses_tot,
+                "pctTotal": round(plan_tot / tot_rec_plan * 100, 1) if tot_rec_plan > 0 else 0.0}
+
+    receita = _secao("Receita")
+    despesa = _secao("Despesa")
+    # saldo mensal
+    saldo = []
+    for i, m in enumerate(meses_show):
+        saldo.append(round(receita["mesesTotal"][i] - despesa["mesesTotal"][i], 2))
+
+    # lista para o editor (todas as folhas com seção)
+    editaveis = []
+    for c in sorted(folhas, key=lambda x: (_tipo_leaf(x, presentes), x)):
+        editaveis.append({"secao": _tipo_leaf(c, presentes), "label": c,
+                          "planejado": round(float(orcamento.get(c) or 0), 2)})
+
+    return {
+        "meses": [_mes_abr(m) for m in meses_show],
+        "janela": janela, "nMeses": n_meses,
+        "receita": receita, "despesa": despesa, "saldo": saldo,
+        "editaveis": editaveis, "temDados": bool(agg),
+    }
+
+
+def render_planejamento(dados):
+    return _GRID_HTML.replace("/*__DADOS__*/", json.dumps(dados, ensure_ascii=False))
+
+
+_GRID_HTML = r"""<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><style>
+:root{--bg:#fff;--ink:#1d2a31;--muted:#6a7a85;--border:#e7ecf0;--gray:#f1f5f7;--teal:#1ba99b;--teal-d:#0f7f74;
+--orange:#f0873c;--orange-d:#d06a24;--over:#d64533;--mono:"IBM Plex Mono",ui-monospace,monospace}
+@media (prefers-color-scheme:dark){:root{--bg:#161e22;--ink:#e6eef1;--muted:#94a6af;--border:#242f35;--gray:#1b242a;
+--teal:#33c3b5;--teal-d:#2bb0a3;--orange:#f5a15c;--orange-d:#ef8a3d;--over:#f0776b}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:"IBM Plex Sans",system-ui,sans-serif;font-size:12.5px}
+.wrap{overflow-x:auto;border:1px solid var(--border);border-radius:12px}
+table{border-collapse:collapse;width:100%;min-width:640px}
+th,td{padding:6px 10px;border-bottom:1px solid var(--border);white-space:nowrap;text-align:right}
+th{position:sticky;top:0;background:var(--bg);color:var(--muted);font-weight:600;font-size:10.5px;text-transform:uppercase;letter-spacing:.03em;z-index:3}
+th.cat,td.cat{text-align:left;position:sticky;left:0;background:var(--bg);z-index:2;min-width:190px}
+th.cat{z-index:4}
+td.num{font-family:var(--mono);font-variant-numeric:tabular-nums}
+tr.sec td{font-weight:700;color:#fff;font-size:11.5px;text-transform:uppercase;letter-spacing:.04em}
+tr.sec.rec td{background:var(--teal)}tr.sec.rec td.cat{background:var(--teal)}
+tr.sec.desp td{background:var(--orange)}tr.sec.desp td.cat{background:var(--orange)}
+tr.grp td{background:var(--gray);font-weight:600}tr.grp td.cat{background:var(--gray)}
+tr.sub td.cat{padding-left:26px;color:var(--muted);font-weight:400}
+tr.tot td{font-weight:700;border-top:2px solid var(--border)}tr.tot td.cat{background:var(--bg)}
+tr.saldo td{background:var(--gray);font-weight:700}tr.saldo td.cat{background:var(--gray)}
+td.plan{font-weight:600}.over{color:var(--over);font-weight:700}
+.muted{color:var(--muted)}.pct{color:var(--muted);font-size:11px}
+.hint{color:var(--muted);font-size:11px;padding:8px 10px 0}
+</style></head><body>
+<div class="hint" id="hint"></div>
+<div class="wrap"><table id="t"></table></div>
+<script>
+const D=/*__DADOS__*/;
+const brl=v=>Number(v||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
+function cellMeses(arr){return arr.map(x=>`<td class="num ${x.over?'over':''}">${x.val?brl(x.val):'<span class=muted>—</span>'}</td>`).join('');}
+function build(){
+  if(!D.temDados){document.getElementById('t').innerHTML='<tr><td class="cat">Sem lançamentos ainda — importe ou lance despesas.</td></tr>';fit();return;}
+  const M=D.meses;
+  let h='<thead><tr><th class="cat">Categorias e Subcategorias</th><th>Planejamento</th><th>%</th><th>Mín</th><th>Méd</th><th>Máx</th>';
+  M.forEach(m=>h+=`<th>${m}</th>`);h+='</tr></thead><tbody>';
+  // saldo mensal
+  h+=`<tr class="saldo"><td class="cat">Saldo Mensal (realizado)</td><td></td><td></td><td></td><td></td><td></td>`;
+  D.saldo.forEach(v=>h+=`<td class="num ${v<0?'over':''}">${brl(v)}</td>`);h+='</tr>';
+  function secao(sec,titulo,cls){
+    h+=`<tr class="sec ${cls}"><td class="cat">${titulo}</td><td class="num">${sec.planTotal?brl(sec.planTotal):''}</td><td>${sec.pctTotal?sec.pctTotal.toFixed(1).replace('.',',')+'%':''}</td><td></td><td></td><td></td>`;
+    sec.mesesTotal.forEach(v=>h+=`<td class="num">${v?brl(v):''}</td>`);h+='</tr>';
+    sec.linhas.forEach(r=>{
+      h+=`<tr class="${r.tipoLinha}"><td class="cat">${r.nome}</td>`;
+      h+=`<td class="num plan">${r.plan?brl(r.plan):'<span class=muted>—</span>'}</td>`;
+      h+=`<td class="pct">${r.pct?r.pct.toFixed(1).replace('.',',')+'%':''}</td>`;
+      h+=`<td class="num muted">${r.min?brl(r.min):''}</td><td class="num">${r.med?brl(r.med):''}</td><td class="num muted">${r.max?brl(r.max):''}</td>`;
+      h+=cellMeses(r.meses)+'</tr>';
+    });
+  }
+  secao(D.receita,'▸ Receitas','rec');
+  secao(D.despesa,'▸ Despesas Mensais','desp');
+  h+='</tbody>';
+  document.getElementById('t').innerHTML=h;
+  document.getElementById('hint').innerHTML=`Mín/Méd/Máx dos últimos <b>${D.janela}</b> meses (só meses com gasto). Vermelho = passou do planejado no mês. Role a tabela para o lado para ver mais meses →`;
+  fit();
+}
+function fit(){const b=document.body,h=Math.ceil(b.getBoundingClientRect().height)+8;
+  try{if(window.frameElement)window.frameElement.style.height=h+'px';}catch(e){}
+  try{parent.postMessage({type:'streamlit:setFrameHeight',height:h},'*');}catch(e){}}
+build();window.addEventListener('load',fit);setTimeout(fit,300);setTimeout(fit,900);
+try{new ResizeObserver(fit).observe(document.body);}catch(e){}
+</script></body></html>"""

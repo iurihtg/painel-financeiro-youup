@@ -279,69 +279,47 @@ with tab_lanc:
 
 # ═══════════════════════════ 📊 ORÇAMENTO ═══════════════════════════
 with tab_orc:
-    st.subheader("📊 Planejamento orçamentário")
-    st.caption("Defina um **teto de gasto** por categoria. O sistema compara com o "
-               "realizado do mês e marca 🔴 onde você estourou. Use mín/médio/máximo "
-               "para pôr metas realistas.")
-    _hoje = _hoje_br()
-    _mes_corr = f"{_hoje.year}-{_hoje.month:02d}"
-    _meses = _orc_mod.meses_disponiveis(TX)
-    _op_mes = sorted(set(_meses + [_mes_corr]), reverse=True)
-    _def_mes = _mes_corr if _mes_corr in _op_mes else (_meses[-1] if _meses else _mes_corr)
-    om1, om2 = st.columns([2, 2])
-    _mes_ref = om1.selectbox("Mês de referência", _op_mes,
-                             index=_op_mes.index(_def_mes), format_func=_mes_label)
-    _jan = om2.selectbox("Base do mín/médio/máx", [3, 6, 12],
-                         format_func=lambda n: f"últimos {n} meses")
-    if not TX:
-        st.info("Lance ou importe despesas primeiro — aí o orçamento ganha base de comparação. "
-                "Você pode definir os tetos aqui mesmo assim.")
+    st.subheader("📊 Planejamento e Controle")
+    st.caption("Planilha estilo Meu Planner: você edita só o **Planejamento** (teto/mês); "
+               "**% · Mín · Méd · Máx** e os meses são calculados. 🔴 = passou do planejado no mês.")
     _orc = store.get_setting("orcamento", {}) or {}
-    _linhas, _tot, _jm = _orc_mod.grade(TX, _orc, _mes_ref, _jan)
-    if not _linhas:
-        st.info("Sem categorias de despesa ainda. Cadastre suas categorias em ⚙️ Cadastros "
-                "e faça alguns lançamentos.")
-    else:
-        _dfo = pd.DataFrame([{
-            "Categoria": l["categoria"], "Planejado": l["planejado"],
-            "Realizado": l["realizado"],
-            "Status": ("🔴 estourou" if l["estourou"] else ("✅ ok" if l["planejado"] > 0 else "— sem meta")),
-            "% usado": (f"{int(l['pct'])}%" if l["pct"] is not None else "—"),
-            "Média": l["media"], "Mín": l["min"], "Máx": l["max"],
-        } for l in _linhas])
-        st.caption(f"Mês: **{_mes_label(_mes_ref)}** · edite a coluna **Planejado** e salve.")
-        _ed = st.data_editor(
-            _dfo, hide_index=True, use_container_width=True, height=430, key="orc_editor",
-            disabled=["Categoria", "Realizado", "Status", "% usado", "Média", "Mín", "Máx"],
-            column_config={
-                "Planejado": st.column_config.NumberColumn("Planejado (teto/mês)", format="R$ %.2f",
-                                                           min_value=0.0, step=50.0),
-                "Realizado": st.column_config.NumberColumn(format="R$ %.2f"),
-                "Média": st.column_config.NumberColumn(format="R$ %.2f"),
-                "Mín": st.column_config.NumberColumn(format="R$ %.2f"),
-                "Máx": st.column_config.NumberColumn(format="R$ %.2f"),
-            })
-        _est = [l for l in _linhas if l["estourou"]]
-        k1, k2, k3 = st.columns(3)
-        k1.metric("Planejado no mês", brl(_tot["planejado"]))
-        k2.metric("Realizado no mês", brl(_tot["realizado"]),
-                  delta=brl(_tot["realizado"] - _tot["planejado"]) if _tot["planejado"] else None,
-                  delta_color="inverse")
-        k3.metric("Categorias estouradas", len(_est))
-        if _est:
-            st.warning("🔴 Estourou em: " + " · ".join(
-                f"{l['categoria']} ({brl(l['realizado'])}/{brl(l['planejado'])})" for l in _est[:8]))
-        if st.button("💾 Salvar planejamento", type="primary"):
-            _novo = dict(_orc)
-            for _, r in _ed.iterrows():
-                v = float(r["Planejado"] or 0)
-                if v > 0:
-                    _novo[r["Categoria"]] = round(v, 2)
-                elif r["Categoria"] in _novo:
-                    del _novo[r["Categoria"]]
-            store.set_setting("orcamento", _novo)
-            st.success("Planejamento salvo. O painel (Balanço → 'Gasto do mês × planejado') já usa esses tetos.")
-            st.rerun()
+    om1, om2 = st.columns([2, 2])
+    _jan = om1.selectbox("Base do Mín/Méd/Máx", [3, 6, 12], index=0,
+                         format_func=lambda n: f"últimos {n} meses")
+    _nm = om2.selectbox("Meses na planilha", [6, 12, 24], index=0,
+                        format_func=lambda n: f"últimos {n} meses")
+    _pdados = _orc_mod.montar_planejamento(TX, _orc, hoje=_hoje_br(), janela=_jan, n_meses=_nm)
+
+    # editor enxuto: só os tetos (a "coluna azul" editável)
+    with st.expander("✏️ Editar os tetos (Planejamento por categoria/subcategoria)", expanded=not _orc):
+        st.caption("Digite o teto mensal de cada item e salve. Deixe 0 para 'sem meta'. "
+                   "Para criar subcategorias, cadastre em ⚙️ Cadastros (viram \"Categoria › Sub\").")
+        _eds = _pdados["editaveis"]
+        if not _eds:
+            st.info("Sem categorias ainda — faça lançamentos ou cadastre categorias.")
+        else:
+            _dfe = pd.DataFrame([{"Seção": e["secao"], "Item": e["label"],
+                                  "Planejado": e["planejado"]} for e in _eds])
+            _ede = st.data_editor(
+                _dfe, hide_index=True, use_container_width=True, height=300, key="orc_tetos",
+                disabled=["Seção", "Item"],
+                column_config={"Planejado": st.column_config.NumberColumn(
+                    "Planejado (R$/mês)", format="R$ %.2f", min_value=0.0, step=50.0)})
+            if st.button("💾 Salvar planejamento", type="primary"):
+                _novo = dict(_orc)
+                for _, r in _ede.iterrows():
+                    v = float(r["Planejado"] or 0)
+                    if v > 0:
+                        _novo[r["Item"]] = round(v, 2)
+                    elif r["Item"] in _novo:
+                        del _novo[r["Item"]]
+                store.set_setting("orcamento", _novo)
+                st.success("Planejamento salvo. A planilha e o painel já usam esses tetos.")
+                st.rerun()
+
+    # a planilha bonita (leitura), estilo Meu Planner
+    _alt = min(900, 190 + (len(_pdados["receita"]["linhas"]) + len(_pdados["despesa"]["linhas"]) + 3) * 34)
+    components.html(_orc_mod.render_planejamento(_pdados), height=_alt, scrolling=True)
 
     st.divider()
     st.subheader("💳 Controle de cartões")
