@@ -159,119 +159,123 @@ def _tipo_leaf(label, presentes):
     return "Receita" if "receita" in label.lower() else "Despesa"
 
 
-def montar_planejamento(tx, orcamento, hoje=None, janela=3, n_meses=6):
-    """Monta a estrutura da planilha: seções Receitas/Despesas, grupos (categoria)
-    com subcategorias, colunas de meses (realizado) e mín/méd/máx da janela."""
+def _grupo_de(cat, cat_grupo):
+    """Grupo pai de uma categoria: pelo mapa cat_grupo, senão pelo prefixo 'Grupo › Sub',
+    senão None (categoria avulsa/standalone)."""
+    g = (cat_grupo or {}).get(cat)
+    if g:
+        return g.strip()
+    gg, s = _split(cat)
+    return gg if s else None
+
+
+def montar_planejamento(tx, orcamento, cat_grupo=None, hoje=None, janela=3, n_meses=6,
+                        extras=None):
+    """Monta a planilha: seções Receitas/Despesas, grupos (categoria-mãe) com
+    subcategorias, meses (realizado), mín/méd/máx da janela e uma lista `rows`
+    achatada (com tipoLinha e chave) pronta para a tabela editável.
+
+    cat_grupo: {categoria: grupo_pai}. extras: [{label,tipo}] categorias sem gasto.
+    """
     hoje = hoje or date.today()
     orcamento = orcamento or {}
+    cat_grupo = cat_grupo or {}
     agg = _agg(tx)
     meses_all = sorted({m for (_, _, m) in agg})
     mes_ref = f"{hoje.year}-{hoje.month:02d}"
-    if mes_ref not in meses_all:
-        meses_all_ref = meses_all + [mes_ref]
-    else:
-        meses_all_ref = meses_all
+    meses_all_ref = meses_all + ([mes_ref] if mes_ref not in meses_all else [])
     meses_show = sorted(set(meses_all_ref))[-n_meses:]
     win = [m for m in meses_all if m <= mes_ref][-janela:]
 
-    # tipo de cada categoria presente
     presentes = {}
     for (tp, cat, _m) in agg:
         presentes.setdefault(cat, tp)
-    # todas as folhas (categorias completas), inclui as que só têm orçamento
+    for e in (extras or []):
+        presentes.setdefault(e["label"], e.get("tipo") or "Despesa")
     folhas = set(presentes) | set(orcamento)
 
     def realizado(cat, m):
         return round(agg.get(("Despesa", cat, m), 0.0) + agg.get(("Receita", cat, m), 0.0), 2)
 
-    # total de receita planejada (base do %)
-    tot_rec_plan = sum(float(orcamento.get(c) or 0) for c in folhas
-                       if _tipo_leaf(c, presentes) == "Receita") or 0.0
+    _rec_leaves = [c for c in folhas if _tipo_leaf(c, presentes) == "Receita"]
+    tot_rec_plan = sum(float(orcamento.get(c) or 0) for c in _rec_leaves)
+    if tot_rec_plan > 0:
+        base_pct = tot_rec_plan
+    else:
+        # sem meta de receita: usa a média mensal realizada de receita como base do %
+        _rv = [sum(realizado(c, m) for c in _rec_leaves) for m in meses_show]
+        _rv = [v for v in _rv if v > 0]
+        base_pct = (sum(_rv) / len(_rv)) if _rv else 0.0
 
-    def _linha(cat, nome_exibir):
-        plan = round(float(orcamento.get(cat) or 0), 2)
+    def _pct(plan):
+        return round(plan / base_pct * 100, 1) if base_pct > 0 else 0.0
+
+    def _row(nome, cat, membros, tipoLinha):
+        plan = round(sum(float(orcamento.get(c) or 0) for c in membros), 2)
         meses_v = []
         for m in meses_show:
-            r = realizado(cat, m)
+            r = round(sum(realizado(c, m) for c in membros), 2)
             meses_v.append({"m": _mes_abr(m), "val": r, "over": (plan > 0 and r > plan)})
-        mn, md, mx = _mmm([realizado(cat, m) for m in win])
-        pct = round(plan / tot_rec_plan * 100, 1) if tot_rec_plan > 0 else 0.0
-        return {"nome": nome_exibir, "cat": cat, "plan": plan, "pct": pct,
-                "min": mn, "med": md, "max": mx, "meses": meses_v}
+        mn, md, mx = _mmm([sum(realizado(c, m) for c in membros) for m in win])
+        return {"nome": nome, "cat": cat, "plan": plan, "pct": _pct(plan),
+                "min": mn, "med": md, "max": mx, "meses": meses_v, "tipoLinha": tipoLinha}
 
     def _secao(tipo):
         leaves = [c for c in folhas if _tipo_leaf(c, presentes) == tipo]
-        # agrupa por grupo (parte antes do ›)
+        # blocos: grupo (com folhas) ou folha avulsa
         grupos = OrderedDict()
+        avulsas = []
         for leaf in leaves:
-            g, s = _split(leaf)
-            grupos.setdefault(g, {"self": None, "subs": []})
-            if s:
-                grupos[g]["subs"].append(leaf)
+            g = _grupo_de(leaf, cat_grupo)
+            if g:
+                grupos.setdefault(g, []).append(leaf)
             else:
-                grupos[g]["self"] = leaf
-        # ordena grupos por gasto total desc
-        def _gtot(g):
-            info = grupos[g]
-            cats = list(info["subs"]) + ([info["self"]] if info["self"] else [])
-            return sum(realizado(c, m) for c in cats for m in meses_show)
+                avulsas.append(leaf)
+        blocos = []
+        for g, membros in grupos.items():
+            blocos.append(("grupo", g, sorted(membros)))
+        for leaf in avulsas:
+            blocos.append(("avulsa", leaf, [leaf]))
+        # ordena por gasto total desc
+        def _tot(bloco):
+            return sum(realizado(c, m) for c in bloco[2] for m in meses_show)
+        blocos.sort(key=_tot, reverse=True)
+
         linhas = []
-        for g in sorted(grupos, key=_gtot, reverse=True):
-            info = grupos[g]
-            subs = sorted(info["subs"])
-            if not subs and info["self"]:
-                # categoria simples: uma linha só (grupo)
-                row = _linha(info["self"], g)
-                row["tipoLinha"] = "grupo"
-                linhas.append(row)
+        for kind, nome, membros in blocos:
+            if kind == "avulsa":
+                r = _row(nome, nome, membros, "leaf")
+                linhas.append(r)
             else:
-                # grupo com subcategorias: linha-grupo = soma das subs (+ self)
-                membros = list(subs) + ([info["self"]] if info["self"] else [])
-                plan = round(sum(float(orcamento.get(c) or 0) for c in membros), 2)
-                meses_v = []
-                for m in meses_show:
-                    r = round(sum(realizado(c, m) for c in membros), 2)
-                    meses_v.append({"m": _mes_abr(m), "val": r, "over": (plan > 0 and r > plan)})
-                mn, md, mx = _mmm([sum(realizado(c, m) for c in membros) for m in win])
-                pct = round(plan / tot_rec_plan * 100, 1) if tot_rec_plan > 0 else 0.0
-                linhas.append({"nome": g, "cat": None, "plan": plan, "pct": pct,
-                               "min": mn, "med": md, "max": mx, "meses": meses_v,
-                               "tipoLinha": "grupo"})
-                if info["self"]:
-                    r = _linha(info["self"], "(geral)")
-                    r["tipoLinha"] = "sub"
-                    linhas.append(r)
-                for leaf in subs:
+                linhas.append(_row(nome, None, membros, "grupo"))
+                for leaf in membros:
                     _g, s = _split(leaf)
-                    r = _linha(leaf, s or leaf)
-                    r["tipoLinha"] = "sub"
-                    linhas.append(r)
-        # total da seção
-        plan_tot = round(sum(float(orcamento.get(c) or 0) for c in leaves), 2)
-        meses_tot = []
-        for m in meses_show:
-            meses_tot.append(round(sum(realizado(c, m) for c in leaves), 2))
-        return {"linhas": linhas, "planTotal": plan_tot, "mesesTotal": meses_tot,
-                "pctTotal": round(plan_tot / tot_rec_plan * 100, 1) if tot_rec_plan > 0 else 0.0}
+                    sub_nome = s if s else leaf   # nome curto se veio 'Grupo › Sub'
+                    linhas.append(_row(sub_nome, leaf, [leaf], "sub"))
+        sec = _row(("Receitas" if tipo == "Receita" else "Despesas Mensais"), None, leaves, "sec")
+        sec["linhas"] = linhas
+        return sec
 
     receita = _secao("Receita")
     despesa = _secao("Despesa")
-    # saldo mensal
-    saldo = []
-    for i, m in enumerate(meses_show):
-        saldo.append(round(receita["mesesTotal"][i] - despesa["mesesTotal"][i], 2))
+    saldo = [round(receita["meses"][i]["val"] - despesa["meses"][i]["val"], 2)
+             for i in range(len(meses_show))]
 
-    # lista para o editor (todas as folhas com seção)
-    editaveis = []
-    for c in sorted(folhas, key=lambda x: (_tipo_leaf(x, presentes), x)):
-        editaveis.append({"secao": _tipo_leaf(c, presentes), "label": c,
-                          "planejado": round(float(orcamento.get(c) or 0), 2)})
+    # rows achatadas (saldo, seção receita + linhas, seção despesa + linhas)
+    rows = []
+    rows.append({"tipoLinha": "saldo", "nome": "Saldo Mensal (realizado)", "cat": None,
+                 "plan": None, "pct": None, "min": None, "med": None, "max": None,
+                 "meses": [{"val": v, "over": v < 0} for v in saldo]})
+    for sec in (receita, despesa):
+        rows.append({k: sec[k] for k in ("tipoLinha", "nome", "cat", "plan", "pct",
+                                         "min", "med", "max", "meses")})
+        rows.extend(sec["linhas"])
 
     return {
         "meses": [_mes_abr(m) for m in meses_show],
         "janela": janela, "nMeses": n_meses,
         "receita": receita, "despesa": despesa, "saldo": saldo,
-        "editaveis": editaveis, "temDados": bool(agg),
+        "rows": rows, "temDados": bool(agg) or bool(folhas),
     }
 
 
@@ -319,8 +323,8 @@ function build(){
   h+=`<tr class="saldo"><td class="cat">Saldo Mensal (realizado)</td><td></td><td></td><td></td><td></td><td></td>`;
   D.saldo.forEach(v=>h+=`<td class="num ${v<0?'over':''}">${brl(v)}</td>`);h+='</tr>';
   function secao(sec,titulo,cls){
-    h+=`<tr class="sec ${cls}"><td class="cat">${titulo}</td><td class="num">${sec.planTotal?brl(sec.planTotal):''}</td><td>${sec.pctTotal?sec.pctTotal.toFixed(1).replace('.',',')+'%':''}</td><td></td><td></td><td></td>`;
-    sec.mesesTotal.forEach(v=>h+=`<td class="num">${v?brl(v):''}</td>`);h+='</tr>';
+    h+=`<tr class="sec ${cls}"><td class="cat">${titulo}</td><td class="num">${sec.plan?brl(sec.plan):''}</td><td>${sec.pct?sec.pct.toFixed(1).replace('.',',')+'%':''}</td><td class="num">${sec.min?brl(sec.min):''}</td><td class="num">${sec.med?brl(sec.med):''}</td><td class="num">${sec.max?brl(sec.max):''}</td>`;
+    sec.meses.forEach(x=>h+=`<td class="num">${x.val?brl(x.val):''}</td>`);h+='</tr>';
     sec.linhas.forEach(r=>{
       h+=`<tr class="${r.tipoLinha}"><td class="cat">${r.nome}</td>`;
       h+=`<td class="num plan">${r.plan?brl(r.plan):'<span class=muted>—</span>'}</td>`;

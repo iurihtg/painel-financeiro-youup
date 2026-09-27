@@ -94,16 +94,12 @@ except Exception as e:  # noqa
 
 
 def opcoes_categorias():
-    """Categorias-padrão + as que o Iuri cadastrou (com subcategorias) + as já usadas."""
+    """Categorias-padrão + as já usadas + as criadas pelo Iuri (lista plana)."""
     opts = set(DEFAULT_CATEGORIES)
-    for c in (store.get_setting("categorias", []) or []):
-        nome = (c.get("nome") or "").strip()
-        if nome:
-            opts.add(nome)
-            for s in c.get("subs", []) or []:
-                if s:
-                    opts.add(f"{nome} › {s}")
     opts |= {t.get("categoria") for t in TX if t.get("categoria")}
+    opts |= {e.get("label") for e in (store.get_setting("categorias_extra", []) or []) if e.get("label")}
+    opts |= set((store.get_setting("cat_grupo", {}) or {}).keys())
+    opts |= set((store.get_setting("orcamento", {}) or {}).keys())
     return sorted(o for o in opts if o)
 
 
@@ -280,46 +276,98 @@ with tab_lanc:
 # ═══════════════════════════ 📊 ORÇAMENTO ═══════════════════════════
 with tab_orc:
     st.subheader("📊 Planejamento e Controle")
-    st.caption("Planilha estilo Meu Planner: você edita só o **Planejamento** (teto/mês); "
-               "**% · Mín · Méd · Máx** e os meses são calculados. 🔴 = passou do planejado no mês.")
+    st.caption("Edite o **Planejamento** direto na planilha (coluna azul). O resto — **% · Mín · Méd · Máx** "
+               "e os meses — é calculado. As despesas ficam **agrupadas** pela categoria-mãe "
+               "(defina os grupos em ⚙️ Cadastros).")
     _orc = store.get_setting("orcamento", {}) or {}
+    _cat_grupo = store.get_setting("cat_grupo", {}) or {}
+    _cat_extra = store.get_setting("categorias_extra", []) or []
     om1, om2 = st.columns([2, 2])
     _jan = om1.selectbox("Base do Mín/Méd/Máx", [3, 6, 12], index=0,
                          format_func=lambda n: f"últimos {n} meses")
     _nm = om2.selectbox("Meses na planilha", [6, 12, 24], index=0,
                         format_func=lambda n: f"últimos {n} meses")
-    _pdados = _orc_mod.montar_planejamento(TX, _orc, hoje=_hoje_br(), janela=_jan, n_meses=_nm)
+    _pd = _orc_mod.montar_planejamento(TX, _orc, cat_grupo=_cat_grupo, hoje=_hoje_br(),
+                                       janela=_jan, n_meses=_nm, extras=_cat_extra)
 
-    # editor enxuto: só os tetos (a "coluna azul" editável)
-    with st.expander("✏️ Editar os tetos (Planejamento por categoria/subcategoria)", expanded=not _orc):
-        st.caption("Digite o teto mensal de cada item e salve. Deixe 0 para 'sem meta'. "
-                   "Para criar subcategorias, cadastre em ⚙️ Cadastros (viram \"Categoria › Sub\").")
-        _eds = _pdados["editaveis"]
-        if not _eds:
-            st.info("Sem categorias ainda — faça lançamentos ou cadastre categorias.")
-        else:
-            _dfe = pd.DataFrame([{"Seção": e["secao"], "Item": e["label"],
-                                  "Planejado": e["planejado"]} for e in _eds])
-            _ede = st.data_editor(
-                _dfe, hide_index=True, use_container_width=True, height=300, key="orc_tetos",
-                disabled=["Seção", "Item"],
-                column_config={"Planejado": st.column_config.NumberColumn(
-                    "Planejado (R$/mês)", format="R$ %.2f", min_value=0.0, step=50.0)})
-            if st.button("💾 Salvar planejamento", type="primary"):
-                _novo = dict(_orc)
-                for _, r in _ede.iterrows():
-                    v = float(r["Planejado"] or 0)
-                    if v > 0:
-                        _novo[r["Item"]] = round(v, 2)
-                    elif r["Item"] in _novo:
-                        del _novo[r["Item"]]
-                store.set_setting("orcamento", _novo)
-                st.success("Planejamento salvo. A planilha e o painel já usam esses tetos.")
-                st.rerun()
+    if not _pd["temDados"]:
+        st.info("Sem categorias ainda. Faça lançamentos (✍️) ou cadastre categorias (⚙️).")
+    else:
+        _rows = _pd["rows"]
+        _mcols = _pd["meses"]
+        # monta o DataFrame da planilha editável
+        _recs = []
+        for r in _rows:
+            base = {"_tipo": r["tipoLinha"], "_cat": r.get("cat") or ""}
+            ind = "     ↳ " if r["tipoLinha"] == "sub" else ("" if r["tipoLinha"] in ("leaf",) else "")
+            nome = r["nome"]
+            if r["tipoLinha"] == "sec":
+                nome = ("▸ " + nome.upper())
+            elif r["tipoLinha"] == "saldo":
+                nome = "＝ " + nome
+            elif r["tipoLinha"] == "grupo":
+                nome = "▸ " + nome
+            elif r["tipoLinha"] == "sub":
+                nome = ind + nome
+            base["Categorias e Subcategorias"] = nome
+            base["Planejamento"] = (None if r["plan"] in (None, 0, 0.0) else float(r["plan"]))
+            base["%"] = ("" if not r.get("pct") else f"{r['pct']:.1f}".replace(".", ",") + "%")
+            base["Mín"] = (None if not r.get("min") else float(r["min"]))
+            base["Méd"] = (None if not r.get("med") else float(r["med"]))
+            base["Máx"] = (None if not r.get("max") else float(r["max"]))
+            _est = 0
+            for i, mc in enumerate(_mcols):
+                mv = r["meses"][i]
+                base[mc] = (float(mv["val"]) if mv["val"] else None)
+                if mv.get("over"):
+                    _est += 1
+            base["⚠"] = ("🔴" if _est else ("" if r["tipoLinha"] in ("sec", "saldo", "grupo")
+                                            else ("✅" if r["plan"] else "")))
+            _recs.append(base)
+        _dfp = pd.DataFrame(_recs)
+        for _nc in ["Planejamento", "Mín", "Méd", "Máx"] + list(_mcols):
+            _dfp[_nc] = pd.to_numeric(_dfp[_nc], errors="coerce")
+        # esconde colunas de mês totalmente vazias (ex.: mês atual sem lançamentos)
+        _mcols_show = [mc for mc in _mcols if _dfp[mc].notna().any()]
+        _fixas = ["_tipo", "_cat", "Categorias e Subcategorias", "Planejamento", "%",
+                  "Mín", "Méd", "Máx", "⚠"]
+        _dfp = _dfp[[c for c in _fixas if c in _dfp.columns] + _mcols_show]
+        _editable = ["Planejamento"]
+        _disabled = [c for c in _dfp.columns if c not in _editable and not c.startswith("_")]
+        _colcfg = {"_tipo": None, "_cat": None,
+                   "Categorias e Subcategorias": st.column_config.TextColumn(width="medium"),
+                   "Planejamento": st.column_config.NumberColumn("✏️ Planejamento", format="R$ %.0f",
+                                                                 min_value=0.0, step=50.0),
+                   "%": st.column_config.TextColumn(width="small"),
+                   "Mín": st.column_config.NumberColumn(format="R$ %.0f"),
+                   "Méd": st.column_config.NumberColumn(format="R$ %.0f"),
+                   "Máx": st.column_config.NumberColumn(format="R$ %.0f"),
+                   "⚠": st.column_config.TextColumn("⚠", width="small")}
+        for mc in _mcols_show:
+            _colcfg[mc] = st.column_config.NumberColumn(format="R$ %.0f")
+        st.caption("Edite só as linhas de **categoria/subcategoria** (as linhas de grupo e de seção "
+                   "somam sozinhas). 🔴 = estourou algum mês · ✅ = dentro do teto. Role para o lado → mais meses.")
+        _hp = min(700, 44 + len(_dfp) * 36)
+        _edp = st.data_editor(_dfp, hide_index=True, use_container_width=True, height=_hp,
+                              key="orc_planilha", disabled=_disabled, column_config=_colcfg)
+        if st.button("💾 Salvar planejamento", type="primary"):
+            _novo = dict(_orc)
+            for i, r in _edp.iterrows():
+                if r["_tipo"] not in ("leaf", "sub"):
+                    continue
+                cat = r["_cat"]
+                v = float(r["Planejamento"] or 0)
+                if v > 0:
+                    _novo[cat] = round(v, 2)
+                elif cat in _novo:
+                    del _novo[cat]
+            store.set_setting("orcamento", _novo)
+            st.success("Planejamento salvo. A planilha, a visão colorida e o painel já usam esses tetos.")
+            st.rerun()
 
-    # a planilha bonita (leitura), estilo Meu Planner
-    _alt = min(900, 190 + (len(_pdados["receita"]["linhas"]) + len(_pdados["despesa"]["linhas"]) + 3) * 34)
-    components.html(_orc_mod.render_planejamento(_pdados), height=_alt, scrolling=True)
+        with st.expander("🎨 Ver planilha colorida (mês a mês, com vermelho no que estourou)"):
+            _alt = min(900, 170 + len(_rows) * 32)
+            components.html(_orc_mod.render_planejamento(_pd), height=_alt, scrolling=True)
 
     st.divider()
     st.subheader("💳 Controle de cartões")
@@ -405,35 +453,72 @@ with tab_cad:
     _meta = store.get_setting("meta_patrimonio", 11_000_000)
     _planos = store.get_setting("planos", []) or []
 
-    # ── categorias e subcategorias ──
-    st.subheader("🏷️ Categorias e subcategorias")
-    st.caption("Crie suas categorias. Subcategorias aparecem no menu como \"Categoria › Sub\".")
-    st.caption("📌 **Exemplo:** categoria _Alimentação_ · subcategorias _Restaurante, Supermercado, iFood_")
-    _cats_user = store.get_setting("categorias", []) or []
+    # ── categorias e grupos (organiza a planilha de Orçamento) ──
+    st.subheader("🏷️ Categorias e grupos")
+    st.caption("Cada categoria pode ter uma **categoria-mãe (grupo)**. Ex.: _Água_, _Luz_, "
+               "_Internet_ e _Financiamento_ com grupo **Moradia** → na aba 📊 Orçamento elas "
+               "aparecem agrupadas embaixo de Moradia.")
+    st.caption("📌 **Exemplo:** categoria _Energia elétrica_ · grupo _Moradia_ · tipo _Despesa_")
+    _cat_grupo = store.get_setting("cat_grupo", {}) or {}
+    _cat_extra = store.get_setting("categorias_extra", []) or []
+
+    # criar categoria nova (aparece mesmo sem lançamento)
     with st.form("nova_cat", clear_on_submit=True):
-        a, b = st.columns([2, 3])
+        a, b, c = st.columns([2, 2, 1.2])
         _cn = a.text_input("Nova categoria")
-        _cs = b.text_input("Subcategorias (separe por vírgula)")
+        _cg = b.text_input("Grupo (categoria-mãe) — opcional")
+        _ct = c.selectbox("Tipo", ["Despesa", "Receita"])
         if st.form_submit_button("➕ Adicionar categoria") and _cn.strip():
-            subs = [s.strip() for s in _cs.split(",") if s.strip()]
-            for c in _cats_user:
-                if (c.get("nome") or "").lower() == _cn.strip().lower():
-                    c["subs"] = sorted(set((c.get("subs") or []) + subs))
-                    break
-            else:
-                _cats_user.append({"nome": _cn.strip(), "subs": subs})
-            store.set_setting("categorias", _cats_user)
+            nome = _cn.strip()
+            if not any(e.get("label") == nome for e in _cat_extra):
+                _cat_extra.append({"label": nome, "tipo": _ct})
+                store.set_setting("categorias_extra", _cat_extra)
+            if _cg.strip():
+                _cat_grupo[nome] = _cg.strip()
+                store.set_setting("cat_grupo", _cat_grupo)
             st.rerun()
-    if _cats_user:
-        for c in _cats_user:
-            cc = st.columns([2, 3, 1])
-            cc[0].write(f"**{c.get('nome')}**")
-            cc[1].write(", ".join(c.get("subs") or []) or "—")
-            if cc[2].button("🗑️", key="delcat_" + (c.get("nome") or "")):
-                store.set_setting("categorias", [x for x in _cats_user if x.get("nome") != c.get("nome")])
-                st.rerun()
-    else:
-        st.info("Ainda usando só as categorias-padrão. Crie as suas acima quando quiser.")
+
+    # tabela: cada categoria com seu grupo (editável) — organiza a hierarquia
+    _usadas = sorted(set(DEFAULT_CATEGORIES)
+                     | {t.get("categoria") for t in TX if t.get("categoria")}
+                     | {e.get("label") for e in _cat_extra if e.get("label")}
+                     | set(_cat_grupo.keys()) | set((store.get_setting("orcamento", {}) or {}).keys()))
+    _usadas = [c for c in _usadas if c]
+    _tipos = {t.get("categoria"): t.get("tipo") for t in TX if t.get("categoria")}
+    for e in _cat_extra:
+        _tipos.setdefault(e.get("label"), e.get("tipo"))
+
+    def _tipo_de(c):
+        return _tipos.get(c) or ("Receita" if "receita" in c.lower() else "Despesa")
+
+    _dfcat = pd.DataFrame([{"Categoria": c, "Tipo": _tipo_de(c),
+                            "Grupo (categoria-mãe)": _cat_grupo.get(c, "")} for c in _usadas])
+    st.caption("Preencha a coluna **Grupo** para agrupar. Deixe em branco para a categoria ficar solta.")
+    _edcat = st.data_editor(
+        _dfcat, hide_index=True, use_container_width=True, height=340, key="cat_editor",
+        disabled=["Categoria", "Tipo"],
+        column_config={"Grupo (categoria-mãe)": st.column_config.TextColumn(
+            "Grupo (categoria-mãe)", help="Ex.: Moradia, Transporte, Alimentação")})
+    cbtn = st.columns([1, 3])
+    if cbtn[0].button("💾 Salvar grupos", type="primary"):
+        _novo_g = {}
+        for _, r in _edcat.iterrows():
+            g = str(r["Grupo (categoria-mãe)"] or "").strip()
+            if g:
+                _novo_g[r["Categoria"]] = g
+        store.set_setting("cat_grupo", _novo_g)
+        st.success("Grupos salvos. A planilha de Orçamento já agrupa por eles.")
+        st.rerun()
+
+    # prévia da organização (árvore)
+    _grp_tree = {}
+    for c in _usadas:
+        g = _cat_grupo.get(c)
+        _grp_tree.setdefault(g or "— sem grupo —", []).append(c)
+    with st.expander("👁️ Ver como está organizado (grupos → categorias)"):
+        for g in sorted(_grp_tree, key=lambda x: (x == "— sem grupo —", x)):
+            st.markdown(f"**{g}**")
+            st.caption(" · ".join(sorted(_grp_tree[g])))
 
     st.divider()
     # ── contas, cartões e bancos ──
