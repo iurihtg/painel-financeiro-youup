@@ -4,8 +4,9 @@ Painel Financeiro Youup — interface Streamlit.
 
 Abas:
   🎨 Painel      — as 5 telas bonitas (Balanço, Análises, Contas, Investimentos, Planos)
-  ✍️ Lançamentos — adicionar receitas/despesas manualmente, importar arquivos e editar tudo
-  ⚙️ Cadastros   — contas a pagar/receber, investimentos e planos/metas
+  ✍️ Lançamentos — adicionar receitas/despesas (à mão, por frase ou importando) e editar tudo
+  🔁 Duplicações — motor anti-duplicação: pega o mesmo dinheiro contado 2x
+  ⚙️ Cadastros   — categorias/subcategorias, contas/cartões/bancos, contas a pagar, investimentos, planos
 
 Rodar:  streamlit run app.py
 """
@@ -21,6 +22,8 @@ from contabil.pipeline import process, modelo_excel_bytes, DEFAULT_CATEGORIES
 from contabil.build import build_workbook
 from contabil import db
 from contabil import painel as _painel
+from contabil import reconciliar
+from contabil import assistente
 import streamlit.components.v1 as components
 
 st.set_page_config(page_title="Painel Financeiro Youup", page_icon="📊", layout="wide")
@@ -61,45 +64,73 @@ def brl(v):
         return "R$ 0,00"
 
 
-def categorias_disponiveis(tx):
-    cats = set(DEFAULT_CATEGORIES)
-    cats |= {t.get("categoria") for t in tx if t.get("categoria")}
-    return sorted(c for c in cats if c)
+# ── carrega o histórico UMA vez por rerun (menos chamadas ao backend) ──
+try:
+    TX = store.load_transactions()
+    _erro_banco = None
+except Exception as e:  # noqa
+    TX, _erro_banco = [], e
+
+
+def opcoes_categorias():
+    """Categorias-padrão + as que o Iuri cadastrou (com subcategorias) + as já usadas."""
+    opts = set(DEFAULT_CATEGORIES)
+    for c in (store.get_setting("categorias", []) or []):
+        nome = (c.get("nome") or "").strip()
+        if nome:
+            opts.add(nome)
+            for s in c.get("subs", []) or []:
+                if s:
+                    opts.add(f"{nome} › {s}")
+    opts |= {t.get("categoria") for t in TX if t.get("categoria")}
+    return sorted(o for o in opts if o)
+
+
+def opcoes_contas():
+    """Contas/cartões cadastrados + as origens já usadas + algumas padrão."""
+    reg = [c.get("nome") for c in (store.get_setting("contas_reg", []) or []) if c.get("nome")]
+    usadas = [t.get("fonte") for t in TX if t.get("fonte")]
+    base = ["Manual", "WhatsApp", "Dinheiro", "Pix"]
+    return sorted(set([n for n in reg + usadas + base if n]))
 
 
 # ── sidebar ──
-try:
-    n_hist = store.count_transactions()
-except Exception as e:
-    n_hist = 0
-    st.sidebar.error(f"Banco indisponível: {e}")
+if _erro_banco:
+    st.sidebar.error(f"Banco indisponível: {_erro_banco}")
 st.sidebar.title("Youup Finanças")
-st.sidebar.metric("Lançamentos no histórico", f"{n_hist:,}".replace(",", "."))
+st.sidebar.metric("Lançamentos no histórico", f"{len(TX):,}".replace(",", "."))
 st.sidebar.caption(f"Backend: {db.backend_nome()}")
+
+_resolv = store.get_setting("dedup_resolvidos", {}) or {}
+_sus = reconciliar.detectar(TX, _resolv) if TX else []
+if _sus:
+    st.sidebar.warning(f"🔁 {len(_sus)} possível(is) duplicação(ões) — veja a aba **Duplicações**")
+
 st.sidebar.divider()
 st.sidebar.markdown(
     "**Como alimentar o sistema:**\n\n"
-    "1. **✍️ Lançamentos** → adicione à mão *ou* importe OFX/PDF/Excel.\n"
-    "2. **⚙️ Cadastros** → contas a pagar/receber, investimentos e metas.\n"
-    "3. **🎨 Painel** → veja tudo bonito e atualizado."
+    "1. **✍️ Lançamentos** → à mão, **por frase** (\"gastei 50 no ifood\") ou importe OFX/PDF/Excel.\n"
+    "2. **🔁 Duplicações** → confirme transferências para não contar o mesmo dinheiro 2x.\n"
+    "3. **⚙️ Cadastros** → categorias, contas/cartões, contas a pagar, investimentos, metas.\n"
+    "4. **🎨 Painel** → veja tudo bonito e atualizado."
 )
 
-tab_painel, tab_lanc, tab_cad = st.tabs(["🎨 Painel", "✍️ Lançamentos", "⚙️ Cadastros"])
+tab_painel, tab_lanc, tab_dup, tab_cad = st.tabs(
+    ["🎨 Painel", "✍️ Lançamentos", "🔁 Duplicações", "⚙️ Cadastros"])
 
 # ═══════════════════════════ 🎨 PAINEL ═══════════════════════════
 with tab_painel:
-    _tx = store.load_transactions()
     _contas = store.get_setting("contas", []) or []
     _invs = store.get_setting("investimentos", []) or []
     _meta = store.get_setting("meta_patrimonio", 11_000_000)
     _planos = store.get_setting("planos", []) or []
-    _dados = _painel.compute_dados(_tx, _contas, _invs, _meta, _planos)
+    _dados = _painel.compute_dados(TX, _contas, _invs, _meta, _planos)
     components.html(_painel.render(_dados), height=920, scrolling=True)
 
 # ═══════════════════════════ ✍️ LANÇAMENTOS ═══════════════════════════
 with tab_lanc:
-    _tx_all = store.load_transactions()
-    _cats = categorias_disponiveis(_tx_all)
+    _cats = opcoes_categorias()
+    _contas_opt = opcoes_contas()
 
     st.subheader("➕ Adicionar lançamento manual")
     with st.form("novo_lanc", clear_on_submit=True):
@@ -112,7 +143,8 @@ with tab_lanc:
         _ldesc = m1.text_input("Descrição")
         _lcat = m2.selectbox("Categoria", _cats,
                              index=(_cats.index("A classificar") if "A classificar" in _cats else 0))
-        _lfonte = m3.text_input("Conta / origem", value="Manual")
+        _lfonte = m3.selectbox("Conta / origem", _contas_opt,
+                               index=(_contas_opt.index("Manual") if "Manual" in _contas_opt else 0))
         if st.form_submit_button("➕ Adicionar", type="primary") and _lval > 0:
             _novo = {"data": _ldata.isoformat(), "escopo": "PF" if _lesc.startswith("PF") else "PJ",
                      "fonte": _lfonte or "Manual", "descricao": _ldesc or _lcat,
@@ -122,6 +154,25 @@ with tab_lanc:
             ins, ign = store.save_transactions([_novo])
             st.success("Lançamento adicionado." if ins else "Esse lançamento já existia.")
             st.rerun()
+
+    with st.expander("🗣️ Lançar por frase (prévia da IA do WhatsApp)"):
+        st.caption("Escreva como você falaria. Ex.: \"gastei 50 no ifood\", "
+                   "\"recebi 1200 na maquininha\", \"1500 aluguel ontem\".")
+        _frase = st.text_input("Frase", key="frase_nl", label_visibility="collapsed",
+                               placeholder="gastei 50 no ifood")
+        if _frase:
+            _in = assistente.interpretar(_frase)
+            if not _in["ok"]:
+                st.error(_in["aviso"])
+            else:
+                st.markdown(f"→ **{_in['tipo']}** de **{brl(_in['valor'])}** · {_in['categoria']} "
+                            f"· {_in['escopo']} · {_in['data']}")
+                if _in.get("aviso"):
+                    st.info(_in["aviso"])
+                if st.button("💾 Salvar esse lançamento", key="save_nl", type="primary"):
+                    store.save_transactions([assistente.para_lancamento(_in)])
+                    st.success("Salvo!")
+                    st.rerun()
 
     st.divider()
     st.subheader("📥 Importar arquivos (OFX / PDF / Excel)")
@@ -163,11 +214,11 @@ with tab_lanc:
 
     st.divider()
     st.subheader("📋 Todos os lançamentos")
-    if not _tx_all:
+    if not TX:
         st.info("Nenhum lançamento ainda. Adicione acima ou importe um arquivo.")
     else:
         so_class = st.checkbox("Mostrar só os 'A classificar'", value=False)
-        dfa = pd.DataFrame(_tx_all)
+        dfa = pd.DataFrame(TX)
         dfa["data"] = pd.to_datetime(dfa["data"], errors="coerce")
         dfa = dfa.sort_values("data", ascending=False)
         if so_class:
@@ -202,6 +253,53 @@ with tab_lanc:
             st.success(f"{ncat} categoria(s) alterada(s), {ndel} excluído(s).")
             st.rerun()
 
+# ═══════════════════════════ 🔁 DUPLICAÇÕES ═══════════════════════════
+with tab_dup:
+    st.subheader("🔁 Conferência anti-duplicação")
+    st.caption("O sistema procura o **mesmo dinheiro contado duas vezes**: transferências "
+               "entre suas contas (ex.: recebe na maquininha PJ → transfere pra conta PF) e "
+               "lançamentos repetidos. Nada é alterado sem você confirmar aqui.")
+    if not _sus:
+        st.success("Nenhuma duplicação pendente. Seus números não estão inflados. ✅")
+    else:
+        st.warning(reconciliar.resumo(_sus))
+        for s in _sus:
+            with st.container(border=True):
+                titulo = "🔄 Transferência interna" if s["kind"] == "transferencia" else "👯 Duplicata"
+                st.markdown(f"**{titulo}** · **{brl(s['valor'])}** · confiança _{s['confianca']}_")
+                st.caption(s["motivo"])
+                for lg in s["legs"]:
+                    seta = "🔻 saiu" if lg["direcao"] == "saída" else "🔺 entrou"
+                    st.write(f"• {lg['data']} · {seta} · **{lg['conta']}** · {lg['descricao']} "
+                             f"· {brl(lg['valor'])}")
+                col = st.columns([2, 2, 3])
+                if s["kind"] == "transferencia":
+                    if col[0].button("✅ É transferência (não contar 2x)",
+                                     key="neu_" + s["sig"], type="primary"):
+                        for _id in s["ids"]:
+                            store.set_tipo(_id, reconciliar.TIPO_INTERNO)
+                        _resolv[s["sig"]] = "neutralizado"
+                        store.set_setting("dedup_resolvidos", _resolv)
+                        st.rerun()
+                else:
+                    if col[0].button("🗑️ Apagar as cópias (manter 1)",
+                                     key="del_" + s["sig"], type="primary"):
+                        for _id in s["ids"][1:]:
+                            store.delete_transaction(_id)
+                        _resolv[s["sig"]] = "neutralizado"
+                        store.set_setting("dedup_resolvidos", _resolv)
+                        st.rerun()
+                if col[1].button("↔️ São coisas diferentes", key="ig_" + s["sig"]):
+                    _resolv[s["sig"]] = "ignorado"
+                    store.set_setting("dedup_resolvidos", _resolv)
+                    st.rerun()
+    if _resolv:
+        st.divider()
+        st.caption(f"{len(_resolv)} decisão(ões) já tomada(s).")
+        if st.button("↩️ Rever tudo de novo (limpar decisões)"):
+            store.set_setting("dedup_resolvidos", {})
+            st.rerun()
+
 # ═══════════════════════════ ⚙️ CADASTROS ═══════════════════════════
 with tab_cad:
     _contas = store.get_setting("contas", []) or []
@@ -209,6 +307,66 @@ with tab_cad:
     _meta = store.get_setting("meta_patrimonio", 11_000_000)
     _planos = store.get_setting("planos", []) or []
 
+    # ── categorias e subcategorias ──
+    st.subheader("🏷️ Categorias e subcategorias")
+    st.caption("Crie suas categorias. Subcategorias aparecem no menu como \"Categoria › Sub\".")
+    _cats_user = store.get_setting("categorias", []) or []
+    with st.form("nova_cat", clear_on_submit=True):
+        a, b = st.columns([2, 3])
+        _cn = a.text_input("Nova categoria")
+        _cs = b.text_input("Subcategorias (separe por vírgula)")
+        if st.form_submit_button("➕ Adicionar categoria") and _cn.strip():
+            subs = [s.strip() for s in _cs.split(",") if s.strip()]
+            for c in _cats_user:
+                if (c.get("nome") or "").lower() == _cn.strip().lower():
+                    c["subs"] = sorted(set((c.get("subs") or []) + subs))
+                    break
+            else:
+                _cats_user.append({"nome": _cn.strip(), "subs": subs})
+            store.set_setting("categorias", _cats_user)
+            st.rerun()
+    if _cats_user:
+        for c in _cats_user:
+            cc = st.columns([2, 3, 1])
+            cc[0].write(f"**{c.get('nome')}**")
+            cc[1].write(", ".join(c.get("subs") or []) or "—")
+            if cc[2].button("🗑️", key="delcat_" + (c.get("nome") or "")):
+                store.set_setting("categorias", [x for x in _cats_user if x.get("nome") != c.get("nome")])
+                st.rerun()
+    else:
+        st.info("Ainda usando só as categorias-padrão. Crie as suas acima quando quiser.")
+
+    st.divider()
+    # ── contas, cartões e bancos ──
+    st.subheader("🏦 Contas, cartões e bancos")
+    st.caption("Cadastre suas contas e cartões — eles viram opções no campo \"Conta / origem\".")
+    _contas_reg = store.get_setting("contas_reg", []) or []
+    with st.form("nova_contareg", clear_on_submit=True):
+        a, b, c, d = st.columns([2, 1.4, 1.4, 1.2])
+        _rn = a.text_input("Nome (ex.: Itaú CC, Cartão Nubank, Cora)")
+        _rt = b.selectbox("Tipo", ["Conta corrente", "Cartão de crédito", "Maquininha",
+                                   "Dinheiro", "Investimento", "Poupança"])
+        _rb = c.text_input("Banco / emissor")
+        _re = d.selectbox("Escopo", ["PF (Iuri)", "PJ (Youup)"])
+        if st.form_submit_button("➕ Adicionar conta/cartão") and _rn.strip():
+            _contas_reg.append({"id": uuid.uuid4().hex[:8], "nome": _rn.strip(), "tipo": _rt,
+                                "banco": _rb.strip(), "escopo": "PF" if _re.startswith("PF") else "PJ"})
+            store.set_setting("contas_reg", _contas_reg)
+            st.rerun()
+    if _contas_reg:
+        for c in _contas_reg:
+            cc = st.columns([2, 1.6, 1.6, 0.8, 0.6])
+            cc[0].write(f"**{c.get('nome')}**")
+            cc[1].write(c.get("tipo") or "—")
+            cc[2].write(c.get("banco") or "—")
+            cc[3].write(c.get("escopo") or "—")
+            if cc[4].button("🗑️", key="delreg_" + c["id"]):
+                store.set_setting("contas_reg", [x for x in _contas_reg if x.get("id") != c["id"]])
+                st.rerun()
+    else:
+        st.info("Nenhuma conta/cartão cadastrado. Cadastre para facilitar os lançamentos.")
+
+    st.divider()
     st.subheader("📅 Contas a pagar / receber")
     with st.form("nova_conta", clear_on_submit=True):
         c1, c2, c3 = st.columns([1, 2, 1])

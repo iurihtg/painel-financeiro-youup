@@ -111,6 +111,36 @@ variável (comportamento intencional). A projeção fixa o valor do recorrente n
 mediana; para capturar tendência de um item específico, edite o valor na aba
 Previsão.
 
+## Motor anti-duplicação + entrada por linguagem natural (Fase 2 — cérebro)
+
+- **`contabil/reconciliar.py`** — detecta o mesmo dinheiro contado 2x.
+  - `detectar(tx, resolvidos)` acha (A) **transferências internas** — uma saída
+    numa conta que reaparece como entrada em outra (mesmo valor, poucos dias,
+    chegada nunca antes da saída) e (B) **duplicatas** (mesmo dia/conta/valor).
+    Regra de ouro: uma **venda/faturamento real nunca é perna de chegada**
+    (`_eh_receita_primaria`), então a receita da maquininha jamais é neutralizada.
+  - Confirmar uma transferência chama `store.set_tipo(id, TIPO_INTERNO)` nas duas
+    pernas. `compute_dados` só soma `tipo in (Receita, Despesa)`, então as pernas
+    somem dos totais **mas continuam no saldo por conta** (o dinheiro andou mesmo).
+  - Decisões ficam em `settings["dedup_resolvidos"]` (`{assinatura: neutralizado|ignorado}`).
+- **`contabil/assistente.py`** — `interpretar(frase)` transforma "gastei 50 no
+  ifood" em rascunho de lançamento (tipo/valor/categoria/escopo/data), determinístico.
+  É o núcleo da entrada por WhatsApp; já usável no app em ✍️ Lançamentos → "Lançar
+  por frase". `para_lancamento(interp)` devolve o dict pronto p/ `save_transactions`.
+- **`store.set_tipo(id, tipo)`** (SQLite e Supabase) — muda só o `tipo`, usado
+  para neutralizar transferências sem apagar o registro.
+- **Ligação do WhatsApp:** ver `FASE2_WHATSAPP.md` (toca infra da clínica —
+  Evolution/n8n — e exige credenciais; NÃO ligar sem o ok do Iuri).
+
+## App em abas (estado atual)
+
+`app.py` tem 4 abas: **🎨 Painel** (5 telas), **✍️ Lançamentos** (manual + por
+frase + importar OFX/PDF/Excel + tabela editável com exclusão), **🔁 Duplicações**
+(fila de conferência do motor anti-duplicação) e **⚙️ Cadastros** (categorias/
+subcategorias, contas/cartões/bancos, contas a pagar/receber, investimentos,
+planos/metas). Categorias e contas cadastradas alimentam os menus dos lançamentos.
+O histórico é carregado 1x por rerun (`TX`) para poupar chamadas ao Supabase.
+
 ## Estrutura
 
 ```

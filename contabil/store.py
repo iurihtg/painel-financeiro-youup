@@ -191,6 +191,17 @@ def delete_transaction(tx_id, db_path=DEFAULT_DB):
         conn.close()
 
 
+def set_tipo(tx_id, tipo, db_path=DEFAULT_DB):
+    """Muda o `tipo` de um lançamento (usado pelo motor anti-duplicação para
+    neutralizar transferências internas sem apagar o registro)."""
+    conn = connect(db_path)
+    try:
+        conn.execute("UPDATE transactions SET tipo=? WHERE id=?", (tipo, tx_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def count_transactions(db_path=DEFAULT_DB):
     if not os.path.exists(db_path):
         return 0

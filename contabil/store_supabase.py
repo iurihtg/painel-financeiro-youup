@@ -102,6 +102,16 @@ def delete_transaction(tx_id, db_path=None):
     r.raise_for_status()
 
 
+def set_tipo(tx_id, tipo, db_path=None):
+    """Muda o `tipo` de um lançamento (neutraliza transferências internas)."""
+    r = requests.patch(
+        _rest(f"transactions?id=eq.{tx_id}"),
+        headers=_headers({"Prefer": "return=minimal"}),
+        json={"tipo": tipo}, timeout=30,
+    )
+    r.raise_for_status()
+
+
 def count_transactions(db_path=None):
     r = requests.get(
         _rest("transactions?select=id"),
