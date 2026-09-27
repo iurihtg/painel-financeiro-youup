@@ -104,7 +104,8 @@ with tab_painel:
     _contas = store.get_setting("contas", []) or []
     _invs = store.get_setting("investimentos", []) or []
     _meta = store.get_setting("meta_patrimonio", 11_000_000)
-    _dados = _painel.compute_dados(_tx, _contas, _invs, _meta)
+    _planos = store.get_setting("planos", []) or []
+    _dados = _painel.compute_dados(_tx, _contas, _invs, _meta, _planos)
     _components.html(_painel.render(_dados), height=1500, scrolling=True)
 
     with st.expander("📅 Contas a pagar/receber — cadastrar e dar baixa"):
@@ -182,6 +183,44 @@ with tab_painel:
                     st.rerun()
         else:
             st.info("Sem investimentos cadastrados. Adicione um acima.")
+
+    with st.expander("🎯 Planos & Metas — cadastrar e aportar"):
+        with st.form("novo_plano", clear_on_submit=True):
+            p1, p2 = st.columns([2, 1])
+            _pnome = p1.text_input("Nome do plano (ex.: Reserva, Quitar carro, Independência 11mi)")
+            _ptipo = p2.selectbox("Tipo", ["Meta (guardar)", "Dívida (quitar)"])
+            p3, p4, p5 = st.columns(3)
+            _ptotal = p3.number_input("Valor total (R$)", min_value=0.0, step=500.0)
+            _parr = p4.number_input("Já guardado (R$)", min_value=0.0, step=500.0)
+            _pparc = p5.number_input("Aporte por mês (R$)", min_value=0.0, step=100.0)
+            if st.form_submit_button("➕ Criar plano") and _pnome and _ptotal > 0:
+                _planos.append({"id": _uuid.uuid4().hex[:8], "nome": _pnome,
+                                "tipo": "divida" if _ptipo.startswith("Dívida") else "meta",
+                                "total": float(_ptotal), "arrecadado": float(_parr),
+                                "parcela": float(_pparc)})
+                store.set_setting("planos", _planos)
+                st.success("Plano criado.")
+                st.rerun()
+
+        if _planos:
+            st.caption("Faça um aporte (soma ao que já foi guardado) ou remova o plano:")
+            for p in _planos:
+                pc = st.columns([3, 1.3, 1, 1])
+                _tot = float(p.get("total") or 0)
+                _ar = float(p.get("arrecadado") or 0)
+                _pctp = int(_ar / _tot * 100) if _tot else 0
+                pc[0].write(f"**{p.get('nome')}** · {_pctp}% · R$ {_ar:,.0f} / {_tot:,.0f}".replace(",", "."))
+                _ap = pc[1].number_input("Aportar", min_value=0.0, step=100.0,
+                                         key="ap_" + p["id"], label_visibility="collapsed")
+                if pc[2].button("💰 Aportar", key="apb_" + p["id"]) and _ap > 0:
+                    p["arrecadado"] = _ar + float(_ap)
+                    store.set_setting("planos", _planos)
+                    st.rerun()
+                if pc[3].button("🗑️", key="delp_" + p["id"]):
+                    store.set_setting("planos", [x for x in _planos if x.get("id") != p["id"]])
+                    st.rerun()
+        else:
+            st.info("Sem planos cadastrados. Crie um acima (ex.: sua meta dos 11 milhões).")
 
 # ══════════════════════════════ 1. IMPORTAR ══════════════════════════════
 with tab_imp:

@@ -25,7 +25,7 @@ def _mes(d):
     return s[:7] if len(s) >= 7 and s[4] == "-" else None
 
 
-def compute_dados(tx, contas=None, investimentos=None, meta=11_000_000):
+def compute_dados(tx, contas=None, investimentos=None, meta=11_000_000, planos=None):
     """Transforma os lançamentos reais no dicionário que o painel consome."""
     despesas = [t for t in tx if t.get("tipo") == "Despesa" and float(t.get("saida") or 0) > 0]
     receitas = [t for t in tx if t.get("tipo") == "Receita" and float(t.get("entrada") or 0) > 0]
@@ -174,6 +174,28 @@ def compute_dados(tx, contas=None, investimentos=None, meta=11_000_000):
                                  key=lambda x: -x["valor"]),
     }
 
+    # planos & metas (JSON em settings)
+    planos = planos or []
+    p_lista = []
+    for p in planos:
+        total = float(p.get("total") or 0)
+        arr = float(p.get("arrecadado") or 0)
+        p_lista.append({"nome": p.get("nome") or "Plano", "tipo": p.get("tipo") or "meta",
+                        "arrecadado": round(arr, 2), "total": round(total, 2),
+                        "falta": round(max(total - arr, 0), 2), "parcela": round(float(p.get("parcela") or 0), 2),
+                        "pct": round((arr / total * 100) if total else 0, 1)})
+    planos_d = {
+        "temPlanos": bool(planos),
+        "guardado": round(sum(x["arrecadado"] for x in p_lista), 2),
+        "metas": round(sum(x["total"] for x in p_lista), 2),
+        "aporteMes": round(sum(x["parcela"] for x in p_lista), 2),
+        "progresso": round((sum(x["arrecadado"] for x in p_lista) / sum(x["total"] for x in p_lista) * 100)
+                           if sum(x["total"] for x in p_lista) else 0, 1),
+        "cards": [{"nome": x["nome"], "pct": x["pct"], "arrecadado": x["arrecadado"], "total": x["total"]}
+                  for x in p_lista[:6]],
+        "lista": p_lista,
+    }
+
     return {
         "temDados": True,
         "mesAtual": f"{NOMES_MES[int(mes_atual[5:7])]} {ano_atual}",
@@ -181,7 +203,7 @@ def compute_dados(tx, contas=None, investimentos=None, meta=11_000_000):
         "realizadoPlanejado": realizadoPlanejado, "catPct": catPct, "cartoes": cartoes,
         "rankDespesa": rankDespesa, "composicaoReceita": composicaoReceita,
         "porAno": porAno, "saldoConta": saldoConta, "ultimos": ultimos,
-        "contas": contas_d, "inv": inv_d,
+        "contas": contas_d, "inv": inv_d, "planos": planos_d,
     }
 
 
@@ -270,6 +292,11 @@ svg{display:block;width:100%;height:auto}.axis{fill:var(--muted);font-size:10px;
 .tbl td{padding:7px 8px;border-bottom:1px solid var(--border);font-family:"IBM Plex Mono",monospace;font-variant-numeric:tabular-nums}
 .tbl td.n{font-family:"IBM Plex Sans",sans-serif;font-weight:500}.tbl tr:last-child td{border-bottom:0}
 @media(max-width:640px){.invhero{grid-template-columns:1fr}}
+.pcards{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+.pcard{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:14px;box-shadow:var(--shadow);text-align:center}
+.pcard .t{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.03em;font-weight:600;margin-bottom:6px;min-height:26px;display:flex;align-items:center;justify-content:center;line-height:1.2}
+.pcard svg{width:104px;margin:0 auto}.pcard .sub{font-size:11px;color:var(--muted);margin-top:5px;font-family:"IBM Plex Mono",monospace}
+@media(max-width:640px){.pcards{grid-template-columns:repeat(2,1fr)}}
 .view[hidden]{display:none}
 .app{grid-template-columns:180px 1fr}
 @media(max-width:640px){.app{grid-template-columns:1fr}.side{flex-direction:row;overflow-x:auto;border-right:0;border-bottom:1px solid var(--border)}.brand small{display:none}.nav{width:auto;white-space:nowrap}.kpis,.grid2{grid-template-columns:1fr}.rp{flex-direction:column-reverse;align-items:stretch}.donutwrap{width:100%}.ranked .row{grid-template-columns:100px 1fr auto}}
@@ -322,7 +349,12 @@ svg{display:block;width:100%;height:auto}.axis{fill:var(--muted);font-size:10px;
       </div>
       <p style="font-size:12px;color:var(--muted);margin:6px 2px 0">Cadastre e dê baixa nas contas logo abaixo do painel (seção <b>“Contas a pagar/receber”</b>).</p>
     </section>
-    <section class="view" data-v="planos" hidden><div class="soon"><p style="font-size:32px;margin:0">🎯</p><b>Planos &amp; Metas</b><p>Aqui vão entrar suas metas (reserva, quitar financiamento, os 11 milhões). Precisa do cadastro de planos — próximo passo.</p></div></section>
+    <section class="view" data-v="planos" hidden>
+      <div class="kpis" id="pkpis"></div>
+      <div class="card"><div class="hd"><h3>Principais planos</h3></div><div class="pcards" id="pcards"></div></div>
+      <div class="card"><div class="hd"><h3>Todos os planos</h3></div><div id="planosTbl"></div></div>
+      <p style="font-size:12px;color:var(--muted);margin:6px 2px 0">Cadastre e faça aportes na seção <b>“Planos &amp; Metas”</b> logo abaixo do painel.</p>
+    </section>
     <section class="view" data-v="inv" hidden>
       <div class="invhero" id="invhero"></div>
       <div class="grid2" style="margin-top:12px">
@@ -415,6 +447,20 @@ function renderInv(){const iv=DADOS.inv,cores=['var(--teal)','var(--orange)','va
   iv.porEmissor.forEach(e=>{const cl=e.pct<0?'var(--over)':'var(--teal-2)';t+=`<tr><td class="n">${e.nome}</td><td style="text-align:right">R$ ${brl2(e.investido)}</td><td style="text-align:right">R$ ${brl2(e.saldo)}</td><td style="text-align:right;color:${cl}">${e.pct>=0?'+':''}${e.pct.toFixed(1).replace('.',',')}%</td></tr>`;});
   document.getElementById('emissorTbl').innerHTML=t+'</tbody></table>';}
 
+function renderPlanos(){const pl=DADOS.planos;
+  if(!pl||!pl.temPlanos){document.querySelector('[data-v="planos"]').innerHTML='<div class="soon"><p style="font-size:32px;margin:0">🎯</p><b>Planos &amp; Metas</b><p>Cadastre suas metas (reserva, quitar dívida, os 11 milhões) na seção “Planos & Metas” logo abaixo do painel.</p></div>';return;}
+  document.getElementById('pkpis').innerHTML=`
+    <div class="kpi r"><div class="ico">🐷</div><div><div class="lbl">Guardado</div><div class="val"><span class="c">R$</span>${brl2(pl.guardado)}</div></div></div>
+    <div class="kpi s"><div class="ico">🎯</div><div><div class="lbl">Soma das metas</div><div class="val"><span class="c">R$</span>${brl2(pl.metas)}</div></div></div>
+    <div class="kpi d"><div class="ico">📅</div><div><div class="lbl">Aporte previsto/mês</div><div class="val"><span class="c">R$</span>${brl2(pl.aporteMes)}</div></div></div>`;
+  const host=document.getElementById('pcards');host.innerHTML='';
+  pl.cards.forEach(c=>{const card=document.createElement('div');card.className='pcard';card.innerHTML=`<div class="t">${c.nome}</div>`;
+    const svg=el('svg',{viewBox:'0 0 108 108'});donut(svg,54,54,40,12,c.pct,'var(--teal)',c.pct.toFixed(0)+'%',null,`${c.nome}<br>R$ ${brl2(c.arrecadado)} de R$ ${brl2(c.total)}`);
+    card.appendChild(svg);const d=document.createElement('div');d.className='sub';d.textContent=`${brl(c.arrecadado)} / ${brl(c.total)}`;card.appendChild(d);host.appendChild(card);});
+  let t='<table class="tbl"><thead><tr><th>Plano</th><th style="text-align:right">Guardado</th><th style="text-align:right">Meta</th><th style="text-align:right">Falta</th><th style="text-align:right">Aporte/mês</th></tr></thead><tbody>';
+  pl.lista.forEach(p=>{t+=`<tr><td class="n">${p.nome}</td><td style="text-align:right">R$ ${brl2(p.arrecadado)}</td><td style="text-align:right">R$ ${brl2(p.total)}</td><td style="text-align:right">R$ ${brl2(p.falta)}</td><td style="text-align:right">R$ ${brl2(p.parcela)}</td></tr>`;});
+  document.getElementById('planosTbl').innerHTML=t+'</tbody></table>';}
+
 function build(){
   if(!DADOS.temDados){document.querySelector('.main').innerHTML='<div class="soon"><p style="font-size:32px;margin:0">📥</p><b>Sem dados ainda</b><p>Importe faturas/extratos (aba Importar, aqui embaixo) e clique em Salvar no histórico. Aí o painel ganha vida.</p></div>';return;}
   document.getElementById('pillmes').innerHTML='<span class="dot"></span>'+DADOS.mesAtual;
@@ -456,7 +502,7 @@ function build(){
       const t=el('text',{x:x+30,y:Y(v)-7,'text-anchor':'middle'});t.setAttribute('style','fill:var(--ink);font-size:11px;font-weight:700;font-family:IBM Plex Mono');t.textContent=brl(v);s.appendChild(t);});
     [['Receitas',gx-40],['Despesas',gx+40]].forEach(([n,x])=>{const l=el('text',{x,y:H-9,'text-anchor':'middle'});l.setAttribute('class','mlab');l.textContent=n;s.appendChild(l);});})();
   ranked('saldoconta',DADOS.saldoConta,true);
-  renderContas();renderInv();
+  renderContas();renderInv();renderPlanos();
 }
 document.querySelectorAll('.nav').forEach(b=>b.addEventListener('click',()=>{
   document.querySelectorAll('.nav').forEach(x=>x.classList.remove('active'));b.classList.add('active');
