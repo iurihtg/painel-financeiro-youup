@@ -92,7 +92,16 @@ except Exception as e:
 st.sidebar.metric("Lançamentos no histórico", f"{n_hist:,}".replace(",", "."))
 st.sidebar.caption(f"Backend: {db.backend_nome()}")
 
-tab_imp, tab_dash, tab_prev = st.tabs(["📥 Importar", "📈 Dashboard", "🔮 Previsão"])
+tab_painel, tab_imp, tab_dash, tab_prev = st.tabs(
+    ["🎨 Painel", "📥 Importar", "📈 Dashboard", "🔮 Previsão"])
+
+# ══════════════════════════════ 0. PAINEL (bonito) ══════════════════════════════
+with tab_painel:
+    import streamlit.components.v1 as _components
+    from contabil import painel as _painel
+    _tx = store.load_transactions()
+    _dados = _painel.compute_dados(_tx)
+    _components.html(_painel.render(_dados), height=1500, scrolling=True)
 
 # ══════════════════════════════ 1. IMPORTAR ══════════════════════════════
 with tab_imp:
