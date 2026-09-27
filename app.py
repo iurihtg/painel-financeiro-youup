@@ -111,6 +111,20 @@ def opcoes_contas():
     return sorted(set([n for n in reg + usadas + base if n]))
 
 
+def _cat_sub(cat, cat_grupo):
+    """Separa a categoria guardada em (categoria-mãe, subcategoria).
+    Usa o mapa de grupos do Cadastro; senão o separador do nome ('/', '›')."""
+    c = str(cat or "")
+    g = (cat_grupo or {}).get(c)
+    if g:
+        return g, c
+    for sep in ("›", ">", "/"):
+        if sep in c:
+            a, b = c.split(sep, 1)
+            return a.strip(), b.strip()
+    return c, ""
+
+
 # ── sidebar ──
 if _erro_banco:
     st.sidebar.error(f"Banco indisponível: {_erro_banco}")
@@ -234,44 +248,84 @@ with tab_lanc:
 
     st.divider()
     st.subheader("📋 Todos os lançamentos")
+    _cg_l = store.get_setting("cat_grupo", {}) or {}
     if not TX:
         st.info("Nenhum lançamento ainda. Adicione acima ou importe um arquivo.")
     else:
-        so_class = st.checkbox("Mostrar só os 'A classificar'", value=False)
-        dfa = pd.DataFrame(TX)
-        dfa["data"] = pd.to_datetime(dfa["data"], errors="coerce")
-        dfa = dfa.sort_values("data", ascending=False)
-        if so_class:
-            dfa = dfa[dfa["categoria"] == "A classificar"]
-        show = pd.DataFrame({
-            "Excluir": False, "id": dfa["id"],
-            "Data": dfa["data"].dt.strftime("%d/%m/%Y"), "Tipo": dfa["tipo"],
-            "Escopo": dfa["escopo"], "Conta": dfa["fonte"], "Descrição": dfa["descricao"],
-            "Categoria": dfa["categoria"],
-            "Entrada": pd.to_numeric(dfa["entrada"], errors="coerce").fillna(0.0),
-            "Saída": pd.to_numeric(dfa["saida"], errors="coerce").fillna(0.0),
+        # filtros
+        f1, f2 = st.columns([1.4, 2])
+        _so_class = f1.checkbox("Só os 'A classificar'", value=False)
+        _todas_mae = sorted({_cat_sub(t.get("categoria"), _cg_l)[0] for t in TX if t.get("categoria")})
+        _fmae = f2.multiselect("Filtrar por categoria", _todas_mae, placeholder="todas as categorias")
+
+        _dfa = pd.DataFrame(TX)
+        _dfa["data"] = pd.to_datetime(_dfa["data"], errors="coerce")
+        _dfa = _dfa.sort_values("data", ascending=False)
+        _dfa["_mae"] = _dfa["categoria"].map(lambda c: _cat_sub(c, _cg_l)[0])
+        _dfa["_sub"] = _dfa["categoria"].map(lambda c: _cat_sub(c, _cg_l)[1])
+        if _so_class:
+            _dfa = _dfa[_dfa["categoria"] == "A classificar"]
+        if _fmae:
+            _dfa = _dfa[_dfa["_mae"].isin(_fmae)]
+
+        _val = pd.to_numeric(_dfa["entrada"], errors="coerce").fillna(0.0) - \
+            pd.to_numeric(_dfa["saida"], errors="coerce").fillna(0.0)
+        _view = pd.DataFrame({
+            "Data": _dfa["data"].dt.strftime("%d/%m/%Y"),
+            "Categoria": _dfa["_mae"], "Subcategoria": _dfa["_sub"].replace("", "—"),
+            "Conta": _dfa["fonte"], "Descrição": _dfa["descricao"],
+            "Valor": _val.values, "Escopo": _dfa["escopo"],
         })
-        st.caption(f"{len(show)} lançamento(s). Edite a categoria ou marque 🗑️ e salve.")
-        edited = st.data_editor(
-            show, hide_index=True, use_container_width=True, height=430, key="lanc_editor",
-            disabled=["id", "Data", "Tipo", "Escopo", "Conta", "Descrição", "Entrada", "Saída"],
-            column_config={
-                "id": None,
-                "Excluir": st.column_config.CheckboxColumn("🗑️", width="small"),
-                "Categoria": st.column_config.SelectboxColumn("Categoria", options=_cats),
-                "Entrada": st.column_config.NumberColumn(format="R$ %.2f"),
-                "Saída": st.column_config.NumberColumn(format="R$ %.2f"),
-            })
-        if st.button("💾 Salvar alterações", type="primary"):
-            orig = dict(zip(show["id"], show["Categoria"]))
-            ncat = ndel = 0
-            for _, r in edited.iterrows():
-                if r["Excluir"]:
-                    store.delete_transaction(r["id"]); ndel += 1
-                elif r["Categoria"] != orig.get(r["id"]):
-                    store.set_categoria_manual(r["id"], r["Categoria"]); ncat += 1
-            st.success(f"{ncat} categoria(s) alterada(s), {ndel} excluído(s).")
-            st.rerun()
+        st.caption(f"{len(_view)} lançamento(s). Receitas em verde, despesas em vermelho. "
+                   "(Para reclassificar ou excluir, use os controles abaixo.)")
+
+        def _val_css(v):
+            return "color:#0f7f74;font-weight:700" if v >= 0 else "color:#d64533;font-weight:700"
+
+        def _esc_css(v):
+            if v == "PF":
+                return "background-color:rgba(31,111,214,.12);color:#1f6fd6;font-weight:600"
+            return "background-color:rgba(240,135,60,.16);color:#d06a24;font-weight:600"
+
+        def _cat_css(v):
+            return "color:#c22" if v == "A classificar" else ""
+
+        _sty = (_view.style
+                .format({"Valor": lambda v: brl(v)})
+                .map(_val_css, subset=["Valor"])
+                .map(_esc_css, subset=["Escopo"])
+                .map(_cat_css, subset=["Categoria"]))
+        st.dataframe(_sty, hide_index=True, use_container_width=True,
+                     height=min(560, 44 + len(_view) * 35))
+
+        # opções controladas (sem edição livre de categorias na tabela)
+        _opt_map = {}
+        for _, rr in _dfa.iterrows():
+            lbl = (f"{rr['data'].strftime('%d/%m/%Y') if pd.notna(rr['data']) else '—'} · "
+                   f"{(rr['descricao'] or '')[:34]} · {brl((rr['entrada'] or 0) - (rr['saida'] or 0))}")
+            _opt_map[f"{lbl}  ⟨{rr['id'][:6]}⟩"] = rr["id"]
+
+        with st.expander("🏷️ Reclassificar um lançamento (escolhe da lista de categorias)"):
+            st.caption("A categoria vem da lista já existente — não dá pra criar/editar categorias aqui "
+                       "(isso é feito em ⚙️ Cadastros). Assim o Orçamento não embola.")
+            rc1, rc2 = st.columns([2, 2])
+            _alvo = rc1.selectbox("Lançamento", list(_opt_map.keys()), key="rc_lanc")
+            _cats_leaf = opcoes_categorias()
+            _nova = rc2.selectbox("Nova categoria", _cats_leaf, key="rc_cat",
+                                  index=(_cats_leaf.index("A classificar") if "A classificar" in _cats_leaf else 0))
+            if st.button("✅ Aplicar categoria", key="rc_apply") and _alvo:
+                store.set_categoria_manual(_opt_map[_alvo], _nova)
+                st.success("Categoria atualizada.")
+                st.rerun()
+
+        with st.expander("🗑️ Excluir lançamentos"):
+            _del = st.multiselect("Selecione os lançamentos para excluir", list(_opt_map.keys()),
+                                  key="del_sel")
+            if st.button("🗑️ Excluir selecionados", key="del_apply") and _del:
+                for k in _del:
+                    store.delete_transaction(_opt_map[k])
+                st.success(f"{len(_del)} lançamento(s) excluído(s).")
+                st.rerun()
 
 # ═══════════════════════════ 📊 ORÇAMENTO ═══════════════════════════
 with tab_orc:
