@@ -222,7 +222,7 @@ _HTML = r"""<!doctype html><html><head><meta charset="utf-8">
 --teal:#33c3b5;--teal-2:#2bb0a3;--teal-soft:rgba(51,195,181,.15);--orange:#f5a15c;--orange-2:#ef8a3d;--orange-soft:rgba(245,161,92,.15);--over:#f0776b;--violet:#a68bf0;--shadow:0 1px 2px rgba(0,0,0,.3),0 12px 30px -16px rgba(0,0,0,.55)}}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:"IBM Plex Sans",system-ui,sans-serif;line-height:1.44}
 h1,h2,h3{font-family:"Bricolage Grotesque","IBM Plex Sans",sans-serif;margin:0;letter-spacing:-.01em}
-.app{display:grid;grid-template-columns:200px 1fr;min-height:100vh}
+.app{display:grid;grid-template-columns:200px 1fr}
 .side{background:var(--surface);border-right:1px solid var(--border);padding:14px 10px;display:flex;flex-direction:column;gap:4px}
 .brand{display:flex;align-items:center;gap:9px;padding:6px 8px 12px}
 .logo{width:32px;height:32px;border-radius:9px;background:linear-gradient(140deg,var(--teal),var(--teal-2));display:grid;place-items:center;color:#fff;font-family:"Bricolage Grotesque";font-weight:700;font-size:16px}
@@ -508,7 +508,15 @@ document.querySelectorAll('.nav').forEach(b=>b.addEventListener('click',()=>{
   document.querySelectorAll('.nav').forEach(x=>x.classList.remove('active'));b.classList.add('active');
   const v=b.dataset.view;document.querySelectorAll('.view').forEach(sec=>sec.hidden=(sec.dataset.v!==v));
   const titles={dash:'Balanço Mensal',anal:'Análises',pend:'Contas a Pagar e a Receber',planos:'Planos & Metas',inv:'Investimentos'};
-  document.getElementById('vtitle').textContent=titles[v];}));
-document.querySelectorAll('.ctabs button').forEach(b=>b.addEventListener('click',()=>{document.querySelectorAll('.ctabs button').forEach(x=>x.classList.remove('on'));b.classList.add('on');drawPend(b.dataset.ct);}));
+  document.getElementById('vtitle').textContent=titles[v];setTimeout(fit,30);}));
+document.querySelectorAll('.ctabs button').forEach(b=>b.addEventListener('click',()=>{document.querySelectorAll('.ctabs button').forEach(x=>x.classList.remove('on'));b.classList.add('on');drawPend(b.dataset.ct);setTimeout(fit,30);}));
+
+// ajuste automático de altura (mata o espaço vazio)
+function fit(){const app=document.querySelector('.app');if(!app)return;const h=Math.ceil(app.getBoundingClientRect().height)+8;
+  try{if(window.frameElement){window.frameElement.style.height=h+'px';}}catch(e){}
+  try{parent.postMessage({type:'streamlit:setFrameHeight',height:h},'*');}catch(e){}
+  try{parent.postMessage({type:'streamlit:componentReady',apiVersion:1},'*');}catch(e){}}
 build();
+fit();window.addEventListener('load',fit);setTimeout(fit,250);setTimeout(fit,800);
+try{new ResizeObserver(fit).observe(document.querySelector('.app'));}catch(e){}
 </script></body></html>"""

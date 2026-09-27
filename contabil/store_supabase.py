@@ -96,6 +96,12 @@ def set_categoria_manual(tx_id, categoria, db_path=None):
     r.raise_for_status()
 
 
+def delete_transaction(tx_id, db_path=None):
+    r = requests.delete(_rest(f"transactions?id=eq.{tx_id}"),
+                        headers=_headers({"Prefer": "return=minimal"}), timeout=30)
+    r.raise_for_status()
+
+
 def count_transactions(db_path=None):
     r = requests.get(
         _rest("transactions?select=id"),

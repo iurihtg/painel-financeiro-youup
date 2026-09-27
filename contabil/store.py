@@ -182,6 +182,15 @@ def set_categoria_manual(tx_id, categoria, db_path=DEFAULT_DB):
         conn.close()
 
 
+def delete_transaction(tx_id, db_path=DEFAULT_DB):
+    conn = connect(db_path)
+    try:
+        conn.execute("DELETE FROM transactions WHERE id=?", (tx_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def count_transactions(db_path=DEFAULT_DB):
     if not os.path.exists(db_path):
         return 0
