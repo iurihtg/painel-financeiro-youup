@@ -367,6 +367,7 @@ with tab_orc:
             elif tl == "grupo":
                 nome = "▸ " + nome
             rec = {"_tipo": _t, "_cat": r.get("cat") or "",
+                   "_sec": (_sec_atual or "Despesa"),
                    "nome": nome,
                    "plan": (None if not r.get("plan") else float(r["plan"])),
                    "pct": ("" if not r.get("pct") else f"{r['pct']:.1f}".replace(".", ",") + "%"),
@@ -409,7 +410,7 @@ with tab_orc:
                                         suppressHeaderMenuButton=True)
             gb.configure_grid_options(getRowStyle=_rowstyle, suppressMovableColumns=True,
                                       headerHeight=34, rowHeight=32)
-            for h in ("_tipo", "_cat"):
+            for h in ("_tipo", "_cat", "_sec"):
                 gb.configure_column(h, hide=True)
             for j in range(len(_kidx)):
                 gb.configure_column(f"o{j}", hide=True)
@@ -430,6 +431,8 @@ with tab_orc:
                 gb.configure_column(f"m{j}", headerName=lab, valueFormatter=_brl,
                                     cellStyle=cs, width=95)
             _go = gb.build()
+            # confirma a edição da célula ao clicar fora (não perde o último valor digitado)
+            _go["stopEditingWhenCellsLoseFocus"] = True
             for _cd in _go.get("columnDefs", []):
                 _cd["suppressMenu"] = True
                 _cd["filter"] = False
@@ -437,28 +440,40 @@ with tab_orc:
                 _cd["menuTabs"] = []
                 _cd["suppressHeaderMenuButton"] = True
             _h = min(760, 70 + len(_dfp) * 32)
+            st.caption("Digite o teto na coluna **Planejamento** e tecle **Enter** (ou clique em outra "
+                       "célula). **Salva sozinho** — fica gravado mesmo se atualizar a página.")
             _grid = AgGrid(_dfp, gridOptions=_go, allow_unsafe_jscode=True,
                            update_mode=GridUpdateMode.VALUE_CHANGED, height=_h,
                            theme="streamlit", fit_columns_on_grid_load=False,
-                           key="orc_aggrid")
-            if st.button("💾 Salvar planejamento", type="primary"):
-                _data = _grid["data"]
-                _novo = dict(_orc)
-                for _, rr in pd.DataFrame(_data).iterrows():
-                    if rr["_tipo"] not in ("leaf", "sub"):
-                        continue
-                    cat = rr["_cat"]
-                    try:
-                        v = float(rr["plan"] or 0)
-                    except (ValueError, TypeError):
-                        v = 0
-                    if v > 0:
-                        _novo[cat] = round(v, 2)
-                    elif cat in _novo:
-                        del _novo[cat]
-                store.set_setting("orcamento", _novo)
-                st.success("Planejamento salvo. A planilha e o painel já usam esses tetos.")
-                st.rerun()
+                           reload_data=False, key="orc_aggrid")
+
+            # ── auto-salva a partir do estado atual da grade (sem depender de botão) ──
+            _data = pd.DataFrame(_grid["data"]) if _grid and _grid.get("data") is not None else _dfp
+            _novo = dict(_orc)          # preserva tetos de categorias fora da visão atual
+            _rec_plan = _desp_plan = 0.0
+            for _, rr in _data.iterrows():
+                if rr.get("_tipo") not in ("leaf", "sub"):
+                    continue
+                cat = rr.get("_cat")
+                try:
+                    v = float(rr.get("plan") or 0)
+                except (ValueError, TypeError):
+                    v = 0
+                if v > 0:
+                    _novo[cat] = round(v, 2)
+                    if rr.get("_sec") == "Receita":
+                        _rec_plan += v
+                    else:
+                        _desp_plan += v
+                else:
+                    _novo.pop(cat, None)
+            if _novo != _orc:
+                store.set_setting("orcamento", _novo)       # grava na hora (persiste no F5)
+
+            rp1, rp2, rp3 = st.columns(3)
+            rp1.metric("🟢 Receita planejada (soma)", brl(_rec_plan))
+            rp2.metric("🟠 Despesa planejada (soma)", brl(_desp_plan))
+            rp3.metric("Sobra planejada", brl(_rec_plan - _desp_plan))
             _saved = True
         except Exception as _e:  # fallback: tabela simples se a AgGrid falhar
             st.caption(f"_(grade avançada indisponível: {_e}; usando a tabela simples)_")
