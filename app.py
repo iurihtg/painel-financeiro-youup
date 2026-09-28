@@ -338,18 +338,18 @@ with tab_lanc:
 
 # ═══════════════════════════ 📊 ORÇAMENTO ═══════════════════════════
 with tab_orc:
-    st.subheader("📊 Planejamento e Controle")
-    st.caption("Edite o **Planejamento** direto na planilha (coluna azul). O resto — **% · Mín · Méd · Máx** "
-               "e os meses — é calculado. As despesas ficam **agrupadas** pela categoria-mãe "
-               "(defina os grupos em ⚙️ Cadastros).")
+    st.markdown("### Planejamento e Controle")
     _orc = store.get_setting("orcamento", {}) or {}
     _cat_grupo = store.get_setting("cat_grupo", {}) or {}
     _cat_extra = store.get_setting("categorias_extra", []) or []
-    om1, om2 = st.columns([2, 2])
-    _jan = om1.selectbox("Base do Mín/Méd/Máx", [3, 6, 12], index=0,
-                         format_func=lambda n: f"últimos {n} meses")
-    _nm = om2.selectbox("Meses na planilha", [6, 12, 24], index=0,
-                        format_func=lambda n: f"últimos {n} meses")
+    om1, om2, om3 = st.columns([1, 1, 2])
+    _jan = om1.selectbox("Mín/Méd/Máx", [3, 6, 12], index=0, format_func=lambda n: f"{n} meses")
+    _nm = om2.selectbox("Meses", [6, 12, 24], index=0, format_func=lambda n: f"{n} meses")
+    with om3:
+        with st.expander("ℹ️ Como usar"):
+            st.markdown("- Edite só a coluna **Planejamento** (grupos e seções somam sozinhos).\n"
+                        "- Salva sozinho ao teclar **Enter**.\n"
+                        "- Meses em **vermelho** = passou do planejado. Role para o lado → mais meses.")
     _pd = _orc_mod.montar_planejamento(TX, _orc, cat_grupo=_cat_grupo, hoje=_data_ref,
                                        janela=_jan, n_meses=_nm, extras=_cat_extra)
 
@@ -397,10 +397,6 @@ with tab_orc:
                 rec[f"o{j}"] = bool(r["meses"][i].get("over"))
             _recs.append(rec)
         _dfp = pd.DataFrame(_recs)
-
-        st.caption("Edite o **Planejamento** nas linhas de categoria/subcategoria (as linhas de "
-                   "**grupo** e **seção** somam sozinhas). Meses em **vermelho** = passou do planejado. "
-                   "Role para o lado → mais meses.")
 
         _saved = False
         try:
@@ -472,8 +468,6 @@ with tab_orc:
                 _cd["menuTabs"] = []
                 _cd["suppressHeaderMenuButton"] = True
             _h = min(760, 70 + len(_dfp) * 32)
-            st.caption("Digite o teto na coluna **Planejamento** e tecle **Enter** (ou clique em outra "
-                       "célula). **Salva sozinho** — fica gravado mesmo se atualizar a página.")
             _grid = AgGrid(_dfp, gridOptions=_go, allow_unsafe_jscode=True,
                            update_mode=GridUpdateMode.VALUE_CHANGED, height=_h,
                            theme="streamlit", fit_columns_on_grid_load=False,
@@ -563,10 +557,9 @@ with tab_orc:
 
 # ═══════════════════════════ 🔁 DUPLICAÇÕES ═══════════════════════════
 with tab_dup:
-    st.subheader("🔁 Conferência anti-duplicação")
-    st.caption("O sistema procura o **mesmo dinheiro contado duas vezes**: transferências "
-               "entre suas contas (ex.: recebe na maquininha PJ → transfere pra conta PF) e "
-               "lançamentos repetidos. Nada é alterado sem você confirmar aqui.")
+    st.markdown("### Conferência anti-duplicação")
+    st.caption("Pega o mesmo dinheiro contado 2x (transferências entre contas e lançamentos repetidos). "
+               "Nada muda sem você confirmar.")
     if not _sus:
         st.success("Nenhuma duplicação pendente. Seus números não estão inflados. ✅")
     else:
@@ -617,9 +610,8 @@ with tab_cad:
 
     # ── categorias e grupos (organiza a planilha de Orçamento) ──
     st.subheader("🏷️ Categorias e grupos")
-    st.caption("Cada categoria pode ter uma **categoria-mãe (grupo)**. Ex.: _Água_, _Luz_, "
-               "_Internet_ e _Financiamento_ com grupo **Moradia** → na aba 📊 Orçamento elas "
-               "aparecem agrupadas embaixo de Moradia.")
+    st.caption("Defina a **categoria-mãe (grupo)** de cada categoria. Ex.: _Água_, _Luz_, _Internet_ "
+               "com grupo **Moradia** → no Orçamento aparecem agrupadas embaixo de Moradia.")
     st.caption("📌 **Exemplo:** categoria _Energia elétrica_ · grupo _Moradia_ · tipo _Despesa_")
     _cat_grupo = store.get_setting("cat_grupo", {}) or {}
     _cat_extra = store.get_setting("categorias_extra", []) or []
