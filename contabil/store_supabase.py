@@ -65,6 +65,17 @@ def save_transactions(tx, db_path=None):
             headers=_headers({"Prefer": "resolution=ignore-duplicates,return=representation"}),
             json=lote, timeout=60,
         )
+        # resiliência: se as colunas novas (data_pgto/status) ainda não existem no
+        # Supabase (schema não migrado), grava sem elas em vez de quebrar.
+        if r.status_code == 400 and ("data_pgto" in r.text or "status" in r.text
+                                     or "column" in r.text.lower()):
+            lote2 = [{k: v for k, v in row.items() if k not in ("data_pgto", "status")}
+                     for row in lote]
+            r = requests.post(
+                _rest("transactions"),
+                headers=_headers({"Prefer": "resolution=ignore-duplicates,return=representation"}),
+                json=lote2, timeout=60,
+            )
         r.raise_for_status()
         inseridos += len(r.json() or [])
     return inseridos, len(rows) - inseridos
