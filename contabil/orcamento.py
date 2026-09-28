@@ -184,8 +184,15 @@ def montar_planejamento(tx, orcamento, cat_grupo=None, hoje=None, janela=3, n_me
     agg = _agg(tx)
     meses_all = sorted({m for (_, _, m) in agg})
     mes_ref = f"{hoje.year}-{hoje.month:02d}"
-    meses_all_ref = meses_all + ([mes_ref] if mes_ref not in meses_all else [])
-    meses_show = sorted(set(meses_all_ref))[-n_meses:]
+    # n meses CONSECUTIVOS terminando no mês de referência (mesmo que algum esteja vazio)
+    _y, _m = hoje.year, hoje.month
+    meses_show = []
+    for k in range(n_meses - 1, -1, -1):
+        yy, mm = _y, _m - k
+        while mm <= 0:
+            mm += 12
+            yy -= 1
+        meses_show.append(f"{yy}-{mm:02d}")
     win = [m for m in meses_all if m <= mes_ref][-janela:]
 
     presentes = {}

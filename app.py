@@ -132,6 +132,15 @@ st.sidebar.title("Youup Finanças")
 st.sidebar.metric("Lançamentos no histórico", f"{len(TX):,}".replace(",", "."))
 st.sidebar.caption(f"Backend: {db.backend_nome()}")
 
+# data de referência (começa em HOJE, mas dá para editar; vale para TODAS as abas)
+_hoje = _hoje_br()
+_data_ref = st.sidebar.date_input("📅 Data de referência", value=_hoje,
+                                  help="Todas as abas usam esta data (hoje por padrão). "
+                                       "Mude para analisar o sistema em outra data.")
+if _data_ref != _hoje:
+    st.sidebar.caption(f"⚠️ Vendo o sistema como se fosse **{_data_ref.strftime('%d/%m/%Y')}** "
+                       f"(hoje é {_hoje.strftime('%d/%m/%Y')}).")
+
 _resolv = store.get_setting("dedup_resolvidos", {}) or {}
 _sus = reconciliar.detectar(TX, _resolv) if TX else []
 if _sus:
@@ -158,7 +167,7 @@ with tab_painel:
     _planos = store.get_setting("planos", []) or []
     _orcamento = store.get_setting("orcamento", {}) or {}
     _dados = _painel.compute_dados(TX, _contas, _invs, _meta, _planos,
-                                   orcamento=_orcamento, hoje=_hoje_br())
+                                   orcamento=_orcamento, hoje=_data_ref)
     components.html(_painel.render(_dados), height=920, scrolling=True)
 
 # ═══════════════════════════ ✍️ LANÇAMENTOS ═══════════════════════════
@@ -169,7 +178,7 @@ with tab_lanc:
     st.subheader("➕ Adicionar lançamento manual")
     with st.form("novo_lanc", clear_on_submit=True):
         l1, l2, l3, l4 = st.columns([1, 1, 1, 1])
-        _ldata = l1.date_input("Data", value=dt.date.today())
+        _ldata = l1.date_input("Data", value=_data_ref)
         _ltipo = l2.selectbox("Tipo", ["Despesa", "Receita"])
         _lval = l3.number_input("Valor (R$)", min_value=0.0, step=10.0)
         _lesc = l4.selectbox("Escopo", ["PF (Iuri)", "PJ (Youup)"])
@@ -341,7 +350,7 @@ with tab_orc:
                          format_func=lambda n: f"últimos {n} meses")
     _nm = om2.selectbox("Meses na planilha", [6, 12, 24], index=0,
                         format_func=lambda n: f"últimos {n} meses")
-    _pd = _orc_mod.montar_planejamento(TX, _orc, cat_grupo=_cat_grupo, hoje=_hoje_br(),
+    _pd = _orc_mod.montar_planejamento(TX, _orc, cat_grupo=_cat_grupo, hoje=_data_ref,
                                        janela=_jan, n_meses=_nm, extras=_cat_extra)
 
     if not _pd["temDados"]:
@@ -349,9 +358,9 @@ with tab_orc:
     else:
         _rows = _pd["rows"]
         _mcols = _pd["meses"]
-        # índices dos meses com dados (some coluna vazia do mês atual)
-        _kidx = [i for i in range(len(_mcols)) if any(r["meses"][i]["val"] for r in _rows)]
-        _mlabels = [_mcols[i] for i in _kidx]
+        # mostra TODOS os meses selecionados (inclusive o mês atual, mesmo vazio)
+        _kidx = list(range(len(_mcols)))
+        _mlabels = list(_mcols)
         # tipo por linha (marca receita/despesa nas seções, p/ cor) + grupo pai
         _recs, _sec_atual, _grp_atual = [], None, None
         for r in _rows:
@@ -747,7 +756,7 @@ with tab_cad:
         _val = c3.number_input("Valor (R$)", min_value=0.0, step=50.0)
         c4, c5 = st.columns(2)
         _cat = c4.text_input("Categoria", value="")
-        _venc = c5.date_input("Vencimento", value=dt.date.today())
+        _venc = c5.date_input("Vencimento", value=_data_ref)
         if st.form_submit_button("➕ Adicionar conta") and _desc and _val > 0:
             _contas.append({"id": uuid.uuid4().hex[:8],
                             "tipo": "pagar" if _tipo == "A pagar" else "receber",
