@@ -616,23 +616,56 @@ with tab_cad:
     def _tipo_de(c):
         return _tipos.get(c) or ("Receita" if "receita" in c.lower() else "Despesa")
 
-    _dfcat = pd.DataFrame([{"Categoria": c, "Tipo": _tipo_de(c),
-                            "Grupo (categoria-mãe)": _cat_grupo.get(c, "")} for c in _usadas])
-    st.caption("Preencha a coluna **Grupo** para agrupar. Deixe em branco para a categoria ficar solta.")
+    _dfcat = pd.DataFrame([{"_orig": c, "Categoria": c, "Tipo": _tipo_de(c),
+                            "Grupo (categoria-mãe)": _cat_grupo.get(c, ""),
+                            "Excluir": False} for c in _usadas])
+    st.caption("✏️ Você pode **renomear** (edite a coluna Categoria), **agrupar** (coluna Grupo) "
+               "e **excluir** (marque 🗑️). Renomear/excluir atualiza os lançamentos que usam a categoria.")
     _edcat = st.data_editor(
-        _dfcat, hide_index=True, use_container_width=True, height=340, key="cat_editor",
-        disabled=["Categoria", "Tipo"],
-        column_config={"Grupo (categoria-mãe)": st.column_config.TextColumn(
-            "Grupo (categoria-mãe)", help="Ex.: Moradia, Transporte, Alimentação")})
-    cbtn = st.columns([1, 3])
-    if cbtn[0].button("💾 Salvar grupos", type="primary"):
-        _novo_g = {}
+        _dfcat, hide_index=True, use_container_width=True, height=360, key="cat_editor",
+        disabled=["Tipo"],
+        column_config={
+            "_orig": None,
+            "Categoria": st.column_config.TextColumn("Categoria (edite p/ renomear)"),
+            "Grupo (categoria-mãe)": st.column_config.TextColumn(
+                "Grupo (categoria-mãe)", help="Ex.: Moradia, Transporte, Alimentação"),
+            "Excluir": st.column_config.CheckboxColumn("🗑️", width="small")})
+    if st.button("💾 Salvar categorias e grupos", type="primary"):
+        _by_cat = {}
+        for t in TX:
+            _by_cat.setdefault(t.get("categoria"), []).append(t.get("id"))
+        _g, _extra2 = {}, list(_cat_extra)
+        _orc_cur = store.get_setting("orcamento", {}) or {}
+        _nren = _ndel = 0
         for _, r in _edcat.iterrows():
-            g = str(r["Grupo (categoria-mãe)"] or "").strip()
-            if g:
-                _novo_g[r["Categoria"]] = g
-        store.set_setting("cat_grupo", _novo_g)
-        st.success("Grupos salvos. A planilha de Orçamento já agrupa por eles.")
+            orig = r["_orig"]
+            novo = str(r["Categoria"] or "").strip()
+            grp = str(r["Grupo (categoria-mãe)"] or "").strip()
+            if bool(r["Excluir"]):
+                for tid in _by_cat.get(orig, []):
+                    store.set_categoria_manual(tid, "A classificar")
+                _extra2 = [e for e in _extra2 if e.get("label") != orig]
+                _orc_cur.pop(orig, None)
+                _ndel += 1
+                continue
+            key = orig
+            if novo and novo != orig:
+                for tid in _by_cat.get(orig, []):
+                    store.set_categoria_manual(tid, novo)
+                for e in _extra2:
+                    if e.get("label") == orig:
+                        e["label"] = novo
+                if orig in _orc_cur:
+                    _orc_cur[novo] = _orc_cur.pop(orig)
+                key = novo
+                _nren += 1
+            if grp:
+                _g[key] = grp
+        store.set_setting("cat_grupo", _g)
+        store.set_setting("categorias_extra", _extra2)
+        store.set_setting("orcamento", _orc_cur)
+        st.success(f"Salvo: {_nren} renomeada(s), {_ndel} excluída(s). Lançamentos, Orçamento e "
+                   "grupos atualizados.")
         st.rerun()
 
     # prévia da organização (árvore)

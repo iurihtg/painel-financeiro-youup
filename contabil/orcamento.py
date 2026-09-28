@@ -251,20 +251,14 @@ def montar_planejamento(tx, orcamento, cat_grupo=None, hoje=None, janela=3, n_me
     receita = _secao("Receita")
     despesa = _secao("Despesa")
 
-    # % = fatia da categoria no total da SEÇÃO (planejado se houver meta, senão realizado do mês ref)
+    # % = fatia da categoria no total REALIZADO da seção (qual categoria pesa mais
+    # nas despesas/receitas), somando os meses exibidos. Independe de haver meta.
     def _fill_pct(sec):
-        plan_total = sec["plan"]
-        if plan_total > 0:
-            base = plan_total
-            def getv(r):
-                return r["plan"] or 0
-        else:
-            base = sec["meses"][ref_idx]["val"] if ref_idx is not None else 0
-            def getv(r):
-                return r["meses"][ref_idx]["val"] if ref_idx is not None else 0
-        sec["pct"] = round(getv(sec) / base * 100, 1) if base > 0 else 0.0
+        base = sum(m["val"] for m in sec["meses"])
+        sec["pct"] = 100.0 if base > 0 else 0.0
         for r in sec["linhas"]:
-            r["pct"] = round(getv(r) / base * 100, 1) if base > 0 else 0.0
+            v = sum(m["val"] for m in r["meses"])
+            r["pct"] = round(v / base * 100, 1) if base > 0 else 0.0
     _fill_pct(receita)
     _fill_pct(despesa)
 
