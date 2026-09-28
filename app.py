@@ -352,14 +352,21 @@ with tab_orc:
         # índices dos meses com dados (some coluna vazia do mês atual)
         _kidx = [i for i in range(len(_mcols)) if any(r["meses"][i]["val"] for r in _rows)]
         _mlabels = [_mcols[i] for i in _kidx]
-        # tipo por linha (marca receita/despesa nas seções, p/ cor)
-        _recs, _sec_atual = [], None
+        # tipo por linha (marca receita/despesa nas seções, p/ cor) + grupo pai
+        _recs, _sec_atual, _grp_atual = [], None, None
         for r in _rows:
             tl = r["tipoLinha"]
             if tl == "sec":
                 _sec_atual = "Receita" if _sec_atual is None else "Despesa"
                 _t = "sec-rec" if _sec_atual == "Receita" else "sec-desp"
-            else:
+                _grp_atual = None
+            elif tl == "grupo":
+                _t = tl
+                _grp_atual = r["nome"]           # nome puro do grupo
+            elif tl in ("leaf", "saldo"):
+                _t = tl
+                _grp_atual = None
+            else:                                 # sub
                 _t = tl
             nome = r["nome"]
             if tl == "sec":
@@ -368,6 +375,8 @@ with tab_orc:
                 nome = "▸ " + nome
             rec = {"_tipo": _t, "_cat": r.get("cat") or "",
                    "_sec": (_sec_atual or "Despesa"),
+                   "_grp": (_grp_atual if tl == "sub" else ""),
+                   "_gid": (r["nome"] if tl == "grupo" else ""),
                    "nome": nome,
                    "plan": (None if not r.get("plan") else float(r["plan"])),
                    "pct": ("" if not r.get("pct") else f"{r['pct']:.1f}".replace(".", ",") + "%"),
@@ -408,9 +417,23 @@ with tab_orc:
             gb.configure_default_column(editable=False, sortable=False, filter=False,
                                         resizable=True, suppressMenu=True, menuTabs=[],
                                         suppressHeaderMenuButton=True)
+            # ao editar o teto de uma folha, atualiza a soma na linha do grupo e da seção (na hora)
+            _onchg = JsCode("""function(e){
+                if(e.column.getColId()!=='plan') return;
+                if(e.data._tipo!=='leaf' && e.data._tipo!=='sub') return;
+                var ss={Receita:0,Despesa:0}, gg={};
+                e.api.forEachNode(function(n){var d=n.data;
+                    if(d._tipo==='leaf'||d._tipo==='sub'){var v=parseFloat(d.plan)||0;
+                        ss[d._sec]=(ss[d._sec]||0)+v;
+                        if(d._grp) gg[d._grp]=(gg[d._grp]||0)+v;}});
+                e.api.forEachNode(function(n){var d=n.data;
+                    if(d._tipo==='sec-rec') n.setDataValue('plan', ss['Receita']||null);
+                    else if(d._tipo==='sec-desp') n.setDataValue('plan', ss['Despesa']||null);
+                    else if(d._tipo==='grupo') n.setDataValue('plan', gg[d._gid]||null);});
+            }""")
             gb.configure_grid_options(getRowStyle=_rowstyle, suppressMovableColumns=True,
-                                      headerHeight=34, rowHeight=32)
-            for h in ("_tipo", "_cat", "_sec"):
+                                      headerHeight=34, rowHeight=32, onCellValueChanged=_onchg)
+            for h in ("_tipo", "_cat", "_sec", "_grp", "_gid"):
                 gb.configure_column(h, hide=True)
             for j in range(len(_kidx)):
                 gb.configure_column(f"o{j}", hide=True)
@@ -450,7 +473,6 @@ with tab_orc:
             # ── auto-salva a partir do estado atual da grade (sem depender de botão) ──
             _data = pd.DataFrame(_grid["data"]) if _grid and _grid.get("data") is not None else _dfp
             _novo = dict(_orc)          # preserva tetos de categorias fora da visão atual
-            _rec_plan = _desp_plan = 0.0
             for _, rr in _data.iterrows():
                 if rr.get("_tipo") not in ("leaf", "sub"):
                     continue
@@ -461,19 +483,10 @@ with tab_orc:
                     v = 0
                 if v > 0:
                     _novo[cat] = round(v, 2)
-                    if rr.get("_sec") == "Receita":
-                        _rec_plan += v
-                    else:
-                        _desp_plan += v
                 else:
                     _novo.pop(cat, None)
             if _novo != _orc:
                 store.set_setting("orcamento", _novo)       # grava na hora (persiste no F5)
-
-            rp1, rp2, rp3 = st.columns(3)
-            rp1.metric("🟢 Receita planejada (soma)", brl(_rec_plan))
-            rp2.metric("🟠 Despesa planejada (soma)", brl(_desp_plan))
-            rp3.metric("Sobra planejada", brl(_rec_plan - _desp_plan))
             _saved = True
         except Exception as _e:  # fallback: tabela simples se a AgGrid falhar
             st.caption(f"_(grade avançada indisponível: {_e}; usando a tabela simples)_")
