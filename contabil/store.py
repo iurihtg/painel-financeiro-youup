@@ -51,6 +51,8 @@ def _init(conn):
         CREATE TABLE IF NOT EXISTS transactions (
             id              TEXT PRIMARY KEY,
             data            TEXT,
+            data_pgto       TEXT,
+            status          TEXT,
             escopo          TEXT,
             fonte           TEXT,
             descricao       TEXT,
@@ -82,6 +84,12 @@ def _init(conn):
         );
         """
     )
+    # migração idempotente: adiciona colunas novas em bancos antigos
+    _cols = {r[1] for r in conn.execute("PRAGMA table_info(transactions)").fetchall()}
+    if "data_pgto" not in _cols:
+        conn.execute("ALTER TABLE transactions ADD COLUMN data_pgto TEXT")
+    if "status" not in _cols:
+        conn.execute("ALTER TABLE transactions ADD COLUMN status TEXT")
     conn.commit()
 
 
@@ -126,10 +134,11 @@ def save_transactions(tx, db_path=DEFAULT_DB):
         for tid, t in assign_ids(tx):
             cur = conn.execute(
                 """INSERT OR IGNORE INTO transactions
-                   (id, data, escopo, fonte, descricao, entrada, saida, tipo,
+                   (id, data, data_pgto, status, escopo, fonte, descricao, entrada, saida, tipo,
                     categoria, categoria_manual, obs, import_ts)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (tid, _iso(t.get("data")), t.get("escopo"), t.get("fonte"),
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (tid, _iso(t.get("data")), _iso(t.get("data_pgto")) or _iso(t.get("data")),
+                 t.get("status"), t.get("escopo"), t.get("fonte"),
                  t.get("descricao"), float(t.get("entrada") or 0), float(t.get("saida") or 0),
                  t.get("tipo"), t.get("categoria"), None, t.get("obs"), ts),
             )
@@ -197,6 +206,24 @@ def set_tipo(tx_id, tipo, db_path=DEFAULT_DB):
     conn = connect(db_path)
     try:
         conn.execute("UPDATE transactions SET tipo=? WHERE id=?", (tipo, tx_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def set_status(tx_id, status, db_path=DEFAULT_DB):
+    conn = connect(db_path)
+    try:
+        conn.execute("UPDATE transactions SET status=? WHERE id=?", (status, tx_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def set_data_pgto(tx_id, data_pgto, db_path=DEFAULT_DB):
+    conn = connect(db_path)
+    try:
+        conn.execute("UPDATE transactions SET data_pgto=? WHERE id=?", (_iso(data_pgto), tx_id))
         conn.commit()
     finally:
         conn.close()

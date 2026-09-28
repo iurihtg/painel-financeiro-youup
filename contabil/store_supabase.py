@@ -48,7 +48,9 @@ def save_transactions(tx, db_path=None):
     rows = []
     for tid, t in assign_ids(tx):
         rows.append({
-            "id": tid, "data": _iso(t.get("data")), "escopo": t.get("escopo"),
+            "id": tid, "data": _iso(t.get("data")),
+            "data_pgto": (_iso(t.get("data_pgto")) or _iso(t.get("data"))) or None,
+            "status": t.get("status"), "escopo": t.get("escopo"),
             "fonte": t.get("fonte"), "descricao": t.get("descricao"),
             "entrada": float(t.get("entrada") or 0), "saida": float(t.get("saida") or 0),
             "tipo": t.get("tipo"), "categoria": t.get("categoria"),
@@ -108,6 +110,24 @@ def set_tipo(tx_id, tipo, db_path=None):
         _rest(f"transactions?id=eq.{tx_id}"),
         headers=_headers({"Prefer": "return=minimal"}),
         json={"tipo": tipo}, timeout=30,
+    )
+    r.raise_for_status()
+
+
+def set_status(tx_id, status, db_path=None):
+    r = requests.patch(
+        _rest(f"transactions?id=eq.{tx_id}"),
+        headers=_headers({"Prefer": "return=minimal"}),
+        json={"status": status}, timeout=30,
+    )
+    r.raise_for_status()
+
+
+def set_data_pgto(tx_id, data_pgto, db_path=None):
+    r = requests.patch(
+        _rest(f"transactions?id=eq.{tx_id}"),
+        headers=_headers({"Prefer": "return=minimal"}),
+        json={"data_pgto": _iso(data_pgto) or None}, timeout=30,
     )
     r.raise_for_status()
 

@@ -193,22 +193,25 @@ with tab_lanc:
 
     st.subheader("➕ Adicionar lançamento")
     with st.form("novo_lanc", clear_on_submit=True):
-        l1, l2, l3 = st.columns([1, 2, 1])
+        l1, l2, l3, l4 = st.columns([1, 2, 1, 1])
         _ldata = l1.date_input("Data do evento", value=_data_ref)
         _lcat = l2.selectbox("Categoria", _cats,
                              index=(_cats.index("A classificar") if "A classificar" in _cats else 0),
                              help="A categoria já define se é entrada (verde) ou saída (vermelho).")
         _lval = l3.number_input("Valor (R$)", min_value=0.0, step=10.0)
-        m1, m2 = st.columns([2, 2])
+        _lstatus = l4.selectbox("Status", ["Concluído", "Pendente"])
+        m1, m2, m3 = st.columns([2, 1.5, 1.5])
         _ldesc = m1.text_input("Descrição")
         _lfonte = m2.selectbox("Instituição / conta", _contas_opt,
                                index=(_contas_opt.index("Manual") if "Manual" in _contas_opt else 0))
+        _lpgto = m3.date_input("Data de pagamento", value=_ldata)
         _tp_prev = _tipo_categoria(_lcat)
         st.caption(f"➡️ Será lançado como **{'entrada 🟢' if _tp_prev == 'Receita' else 'saída 🔴'}** "
                    f"(definido pela categoria _{_lcat}_).")
         if st.form_submit_button("➕ Adicionar", type="primary") and _lval > 0:
             _tp = _tipo_categoria(_lcat)
-            _novo = {"data": _ldata.isoformat(), "escopo": _escopo_conta(_lfonte),
+            _novo = {"data": _ldata.isoformat(), "data_pgto": _lpgto.isoformat(),
+                     "status": _lstatus, "escopo": _escopo_conta(_lfonte),
                      "fonte": _lfonte or "Manual", "descricao": _ldesc or _lcat,
                      "entrada": float(_lval) if _tp == "Receita" else 0.0,
                      "saida": float(_lval) if _tp == "Despesa" else 0.0,
@@ -313,10 +316,20 @@ with tab_lanc:
             pd.to_numeric(_dfa["saida"], errors="coerce").fillna(0.0)
         _inst = _dfa["fonte"].map(lambda f: _inst_cartao(f)[0])
         _cart = _dfa["fonte"].map(lambda f: _inst_cartao(f)[1])
-        _stt = _dfa["data"].map(lambda d: "Concluído" if (pd.notna(d) and d.date() <= _data_ref)
-                                else "Pendente")
+        # data de pagamento (efetivação): usa o campo; se vazio, cai na data do evento
+        _pgto = pd.to_datetime(_dfa.get("data_pgto"), errors="coerce") if "data_pgto" in _dfa else pd.Series([pd.NaT] * len(_dfa))
+        _pgto = _pgto.fillna(_dfa["data"])
+
+        def _status_de(row):
+            s = row.get("status")
+            if s in ("Concluído", "Pendente"):
+                return s
+            d = row.get("data")
+            return "Concluído" if (pd.notna(d) and d.date() <= _data_ref) else "Pendente"
+        _stt = _dfa.apply(_status_de, axis=1)
         _view = pd.DataFrame({
             "Data": _dfa["data"].dt.strftime("%d/%m/%Y"),
+            "Efetivação": _pgto.dt.strftime("%d/%m/%Y"),
             "Categoria": _dfa["_mae"], "Subcategoria": _dfa["_sub"].replace("", "—"),
             "Instituição": _inst.values, "Cartão": _cart.values,
             "Descrição": _dfa["descricao"],
@@ -362,6 +375,15 @@ with tab_lanc:
             if st.button("✅ Aplicar categoria", key="rc_apply") and _alvo:
                 store.set_categoria_manual(_opt_map[_alvo], _nova)
                 st.success("Categoria atualizada.")
+                st.rerun()
+
+        with st.expander("✅ Marcar status (Concluído / Pendente)"):
+            _stsel = st.multiselect("Lançamentos", list(_opt_map.keys()), key="st_sel")
+            _stnovo = st.radio("Novo status", ["Concluído", "Pendente"], horizontal=True, key="st_val")
+            if st.button("✓ Aplicar status", key="st_apply") and _stsel:
+                for k in _stsel:
+                    store.set_status(_opt_map[k], _stnovo)
+                st.success(f"{len(_stsel)} lançamento(s) marcado(s) como {_stnovo}.")
                 st.rerun()
 
         with st.expander("🗑️ Excluir lançamentos"):
