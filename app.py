@@ -125,6 +125,35 @@ def _cat_sub(cat, cat_grupo):
     return c, ""
 
 
+def _add_meses(d, k):
+    """Soma k meses a uma data, ajustando o dia ao fim do mês quando preciso."""
+    import calendar
+    y, m = d.year, d.month + k
+    while m > 12:
+        m -= 12
+        y += 1
+    while m < 1:
+        m += 12
+        y -= 1
+    return dt.date(y, m, min(d.day, calendar.monthrange(y, m)[1]))
+
+
+def _taxonomia(cat_grupo, todas_cats):
+    """{categoria-mãe: [subcategorias]} + mapa (mãe,sub)->categoria canônica guardada."""
+    tax, canon = {}, {}
+    for c in todas_cats:
+        if not c:
+            continue
+        m, s = _cat_sub(c, cat_grupo)
+        tax.setdefault(m, set())
+        if s:
+            tax[m].add(s)
+            canon[(m, s)] = c
+        else:
+            canon[(m, "")] = c
+    return {m: sorted(sv) for m, sv in tax.items()}, canon
+
+
 # ── sidebar ──
 if _erro_banco:
     st.sidebar.error(f"Banco indisponível: {_erro_banco}")
@@ -192,32 +221,53 @@ with tab_lanc:
         return r["escopo"] if (r and r.get("escopo") in ("PF", "PJ")) else "PF"
 
     st.subheader("➕ Adicionar lançamento")
-    with st.form("novo_lanc", clear_on_submit=True):
-        l1, l2, l3, l4 = st.columns([1, 2, 1, 1])
-        _ldata = l1.date_input("Data do evento", value=_data_ref)
-        _lcat = l2.selectbox("Categoria", _cats,
-                             index=(_cats.index("A classificar") if "A classificar" in _cats else 0),
-                             help="A categoria já define se é entrada (verde) ou saída (vermelho).")
-        _lval = l3.number_input("Valor (R$)", min_value=0.0, step=10.0)
-        _lstatus = l4.selectbox("Status", ["Concluído", "Pendente"])
-        m1, m2, m3 = st.columns([2, 1.5, 1.5])
-        _ldesc = m1.text_input("Descrição")
-        _lfonte = m2.selectbox("Instituição / conta", _contas_opt,
-                               index=(_contas_opt.index("Manual") if "Manual" in _contas_opt else 0))
-        _lpgto = m3.date_input("Data de pagamento", value=_ldata)
-        _tp_prev = _tipo_categoria(_lcat)
-        st.caption(f"➡️ Será lançado como **{'entrada 🟢' if _tp_prev == 'Receita' else 'saída 🔴'}** "
-                   f"(definido pela categoria _{_lcat}_).")
-        if st.form_submit_button("➕ Adicionar", type="primary") and _lval > 0:
-            _tp = _tipo_categoria(_lcat)
-            _novo = {"data": _ldata.isoformat(), "data_pgto": _lpgto.isoformat(),
-                     "status": _lstatus, "escopo": _escopo_conta(_lfonte),
-                     "fonte": _lfonte or "Manual", "descricao": _ldesc or _lcat,
-                     "entrada": float(_lval) if _tp == "Receita" else 0.0,
-                     "saida": float(_lval) if _tp == "Despesa" else 0.0,
-                     "tipo": _tp, "categoria": _lcat, "obs": "manual"}
-            ins, ign = store.save_transactions([_novo])
-            st.success("Lançamento adicionado." if ins else "Esse lançamento já existia.")
+    _cg_add = store.get_setting("cat_grupo", {}) or {}
+    _tax, _canon = _taxonomia(_cg_add, _cats)
+    _maes = sorted(_tax.keys())
+    # sem st.form para a Subcategoria reagir à Categoria escolhida
+    a1, a2, a3, a4 = st.columns([2, 2, 1, 1])
+    _idx_mae = _maes.index("A classificar") if "A classificar" in _maes else 0
+    _lmae = a1.selectbox("Categoria", _maes, index=_idx_mae, key="add_mae")
+    _subs = _tax.get(_lmae, [])
+    _lsub = a2.selectbox("Subcategoria", ["(nenhuma)"] + _subs, key="add_sub")
+    _lval = a3.number_input("Valor total (R$)", min_value=0.0, step=10.0, key="add_val")
+    _lparc = a4.number_input("Parcelas", min_value=1, max_value=60, value=1, step=1, key="add_parc")
+    b1, b2, b3, b4 = st.columns([2, 1.5, 1.3, 1.2])
+    _ldesc = b1.text_input("Descrição", key="add_desc")
+    _lfonte = b2.selectbox("Instituição / conta", _contas_opt,
+                           index=(_contas_opt.index("Manual") if "Manual" in _contas_opt else 0),
+                           key="add_fonte")
+    _ldata = b3.date_input("Data do evento", value=_data_ref, key="add_data")
+    _lstatus = b4.selectbox("Status", ["Concluído", "Pendente"], key="add_status")
+
+    # categoria final (canônica) a partir de mãe + subcategoria
+    if _lsub and _lsub != "(nenhuma)":
+        _catfinal = _canon.get((_lmae, _lsub)) or f"{_lmae} › {_lsub}"
+    else:
+        _catfinal = _canon.get((_lmae, "")) or _lmae
+    _tp = _tipo_categoria(_catfinal)
+    _parc_txt = f" em **{int(_lparc)}x** de {brl((_lval / _lparc) if _lparc else 0)}" if _lparc > 1 else ""
+    st.caption(f"➡️ **{'entrada 🟢' if _tp == 'Receita' else 'saída 🔴'}** · categoria _{_catfinal}_{_parc_txt}.")
+
+    if st.button("➕ Adicionar", type="primary", key="add_btn"):
+        if _lval <= 0:
+            st.warning("Informe um valor maior que zero.")
+        else:
+            _n = int(_lparc)
+            _vparc = round(float(_lval) / _n, 2)
+            _novos = []
+            for _k in range(_n):
+                _dk = _add_meses(_ldata, _k)
+                _dsc = (_ldesc or _catfinal) + (f" ({_k + 1}/{_n})" if _n > 1 else "")
+                _novos.append({
+                    "data": _dk.isoformat(), "data_pgto": _dk.isoformat(),
+                    "status": _lstatus, "escopo": _escopo_conta(_lfonte),
+                    "fonte": _lfonte or "Manual", "descricao": _dsc,
+                    "entrada": _vparc if _tp == "Receita" else 0.0,
+                    "saida": _vparc if _tp == "Despesa" else 0.0,
+                    "tipo": _tp, "categoria": _catfinal, "obs": "manual"})
+            _ins, _ign = store.save_transactions(_novos)
+            st.success(f"{_ins} lançamento(s) adicionado(s)." + (f" ({_ign} já existiam.)" if _ign else ""))
             st.rerun()
 
     with st.expander("🗣️ Lançar por frase (prévia da IA do WhatsApp)"):
