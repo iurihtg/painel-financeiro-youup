@@ -175,25 +175,44 @@ with tab_lanc:
     _cats = opcoes_categorias()
     _contas_opt = opcoes_contas()
 
-    st.subheader("➕ Adicionar lançamento manual")
+    # mapa de contas cadastradas (para inferir instituição, cartão e PF/PJ)
+    _reg_l = {c.get("nome"): c for c in (store.get_setting("contas_reg", []) or []) if c.get("nome")}
+
+    def _tipo_categoria(cat):
+        for t in TX:
+            if t.get("categoria") == cat and t.get("tipo") in ("Receita", "Despesa"):
+                return t["tipo"]
+        for e in (store.get_setting("categorias_extra", []) or []):
+            if e.get("label") == cat:
+                return e.get("tipo") or ("Receita" if "receita" in (cat or "").lower() else "Despesa")
+        return "Receita" if "receita" in (cat or "").lower() else "Despesa"
+
+    def _escopo_conta(fonte):
+        r = _reg_l.get(fonte)
+        return r["escopo"] if (r and r.get("escopo") in ("PF", "PJ")) else "PF"
+
+    st.subheader("➕ Adicionar lançamento")
     with st.form("novo_lanc", clear_on_submit=True):
-        l1, l2, l3, l4 = st.columns([1, 1, 1, 1])
-        _ldata = l1.date_input("Data", value=_data_ref)
-        _ltipo = l2.selectbox("Tipo", ["Despesa", "Receita"])
+        l1, l2, l3 = st.columns([1, 2, 1])
+        _ldata = l1.date_input("Data do evento", value=_data_ref)
+        _lcat = l2.selectbox("Categoria", _cats,
+                             index=(_cats.index("A classificar") if "A classificar" in _cats else 0),
+                             help="A categoria já define se é entrada (verde) ou saída (vermelho).")
         _lval = l3.number_input("Valor (R$)", min_value=0.0, step=10.0)
-        _lesc = l4.selectbox("Escopo", ["PF (Iuri)", "PJ (Youup)"])
-        m1, m2, m3 = st.columns([2, 2, 1.4])
+        m1, m2 = st.columns([2, 2])
         _ldesc = m1.text_input("Descrição")
-        _lcat = m2.selectbox("Categoria", _cats,
-                             index=(_cats.index("A classificar") if "A classificar" in _cats else 0))
-        _lfonte = m3.selectbox("Conta / origem", _contas_opt,
+        _lfonte = m2.selectbox("Instituição / conta", _contas_opt,
                                index=(_contas_opt.index("Manual") if "Manual" in _contas_opt else 0))
+        _tp_prev = _tipo_categoria(_lcat)
+        st.caption(f"➡️ Será lançado como **{'entrada 🟢' if _tp_prev == 'Receita' else 'saída 🔴'}** "
+                   f"(definido pela categoria _{_lcat}_).")
         if st.form_submit_button("➕ Adicionar", type="primary") and _lval > 0:
-            _novo = {"data": _ldata.isoformat(), "escopo": "PF" if _lesc.startswith("PF") else "PJ",
+            _tp = _tipo_categoria(_lcat)
+            _novo = {"data": _ldata.isoformat(), "escopo": _escopo_conta(_lfonte),
                      "fonte": _lfonte or "Manual", "descricao": _ldesc or _lcat,
-                     "entrada": float(_lval) if _ltipo == "Receita" else 0.0,
-                     "saida": float(_lval) if _ltipo == "Despesa" else 0.0,
-                     "tipo": _ltipo, "categoria": _lcat, "obs": "manual"}
+                     "entrada": float(_lval) if _tp == "Receita" else 0.0,
+                     "saida": float(_lval) if _tp == "Despesa" else 0.0,
+                     "tipo": _tp, "categoria": _lcat, "obs": "manual"}
             ins, ign = store.save_transactions([_novo])
             st.success("Lançamento adicionado." if ins else "Esse lançamento já existia.")
             st.rerun()
@@ -267,6 +286,19 @@ with tab_lanc:
         _todas_mae = sorted({_cat_sub(t.get("categoria"), _cg_l)[0] for t in TX if t.get("categoria")})
         _fmae = f2.multiselect("Filtrar por categoria", _todas_mae, placeholder="todas as categorias")
 
+        _reg_v = {c.get("nome"): c for c in (store.get_setting("contas_reg", []) or []) if c.get("nome")}
+
+        def _inst_cartao(fonte):
+            r = _reg_v.get(fonte)
+            if r and r.get("tipo") == "Cartão de crédito":
+                return (r.get("banco") or "—"), fonte
+            if r:
+                return (r.get("banco") or fonte), "—"
+            if "cart" in (fonte or "").lower() or "visa" in (fonte or "").lower() \
+                    or "master" in (fonte or "").lower():
+                return "—", fonte
+            return (fonte or "—"), "—"
+
         _dfa = pd.DataFrame(TX)
         _dfa["data"] = pd.to_datetime(_dfa["data"], errors="coerce")
         _dfa = _dfa.sort_values("data", ascending=False)
@@ -279,21 +311,26 @@ with tab_lanc:
 
         _val = pd.to_numeric(_dfa["entrada"], errors="coerce").fillna(0.0) - \
             pd.to_numeric(_dfa["saida"], errors="coerce").fillna(0.0)
+        _inst = _dfa["fonte"].map(lambda f: _inst_cartao(f)[0])
+        _cart = _dfa["fonte"].map(lambda f: _inst_cartao(f)[1])
+        _stt = _dfa["data"].map(lambda d: "Concluído" if (pd.notna(d) and d.date() <= _data_ref)
+                                else "Pendente")
         _view = pd.DataFrame({
             "Data": _dfa["data"].dt.strftime("%d/%m/%Y"),
             "Categoria": _dfa["_mae"], "Subcategoria": _dfa["_sub"].replace("", "—"),
-            "Conta": _dfa["fonte"], "Descrição": _dfa["descricao"],
-            "Valor": _val.values, "Escopo": _dfa["escopo"],
+            "Instituição": _inst.values, "Cartão": _cart.values,
+            "Descrição": _dfa["descricao"],
+            "Valor": _val.values, "Status": _stt.values,
         })
-        st.caption(f"{len(_view)} lançamento(s). Receitas em verde, despesas em vermelho. "
+        st.caption(f"{len(_view)} lançamento(s). Entrada em verde, saída em vermelho. "
                    "(Para reclassificar ou excluir, use os controles abaixo.)")
 
         def _val_css(v):
             return "color:#0f7f74;font-weight:700" if v >= 0 else "color:#d64533;font-weight:700"
 
-        def _esc_css(v):
-            if v == "PF":
-                return "background-color:rgba(31,111,214,.12);color:#1f6fd6;font-weight:600"
+        def _status_css(v):
+            if v == "Concluído":
+                return "background-color:rgba(27,169,155,.14);color:#0f7f74;font-weight:600"
             return "background-color:rgba(240,135,60,.16);color:#d06a24;font-weight:600"
 
         def _cat_css(v):
@@ -302,7 +339,7 @@ with tab_lanc:
         _sty = (_view.style
                 .format({"Valor": lambda v: brl(v)})
                 .map(_val_css, subset=["Valor"])
-                .map(_esc_css, subset=["Escopo"])
+                .map(_status_css, subset=["Status"])
                 .map(_cat_css, subset=["Categoria"]))
         st.dataframe(_sty, hide_index=True, use_container_width=True,
                      height=min(560, 44 + len(_view) * 35))
