@@ -364,11 +364,6 @@ with tab_lanc:
 
         _val = pd.to_numeric(_dfa["entrada"], errors="coerce").fillna(0.0) - \
             pd.to_numeric(_dfa["saida"], errors="coerce").fillna(0.0)
-        _inst = _dfa["fonte"].map(lambda f: _inst_cartao(f)[0])
-        _cart = _dfa["fonte"].map(lambda f: _inst_cartao(f)[1])
-        # data de pagamento (efetivação): usa o campo; se vazio, cai na data do evento
-        _pgto = pd.to_datetime(_dfa.get("data_pgto"), errors="coerce") if "data_pgto" in _dfa else pd.Series([pd.NaT] * len(_dfa))
-        _pgto = _pgto.fillna(_dfa["data"])
 
         def _status_de(row):
             s = row.get("status")
@@ -377,73 +372,76 @@ with tab_lanc:
             d = row.get("data")
             return "Concluído" if (pd.notna(d) and d.date() <= _data_ref) else "Pendente"
         _stt = _dfa.apply(_status_de, axis=1)
-        _view = pd.DataFrame({
-            "Data": _dfa["data"].dt.strftime("%d/%m/%Y"),
-            "Efetivação": _pgto.dt.strftime("%d/%m/%Y"),
-            "Categoria": _dfa["_mae"], "Subcategoria": _dfa["_sub"].replace("", "—"),
-            "Instituição": _inst.values, "Cartão": _cart.values,
-            "Descrição": _dfa["descricao"],
-            "Valor": _val.values, "Status": _stt.values,
+
+        # opções dos dropdowns (validação de dados, estilo Excel)
+        _tax_l, _canon_l = _taxonomia(_cg_l, opcoes_categorias())
+        _maes_l = sorted(set(_tax_l.keys()) | set(_dfa["_mae"].dropna()))
+        _subs_l = sorted({s for subs in _tax_l.values() for s in subs} | set(_dfa["_sub"].dropna()) - {""})
+        _contas_l = sorted(set(opcoes_contas()) | set(_dfa["fonte"].dropna()))
+
+        _show = pd.DataFrame({
+            "id": _dfa["id"].values,
+            "Excluir": False,
+            "Data": _dfa["data"].dt.date.values,
+            "Categoria": _dfa["_mae"].values,
+            "Subcategoria": _dfa["_sub"].replace("", "(nenhuma)").values,
+            "Instituição / Cartão": _dfa["fonte"].values,
+            "Descrição": _dfa["descricao"].fillna("").values,
+            "Valor": _val.values,
+            "Status": _stt.values,
         })
-        st.caption(f"{len(_view)} lançamento(s). Entrada em verde, saída em vermelho. "
-                   "(Para reclassificar ou excluir, use os controles abaixo.)")
-
-        def _val_css(v):
-            return "color:#0f7f74;font-weight:700" if v >= 0 else "color:#d64533;font-weight:700"
-
-        def _status_css(v):
-            if v == "Concluído":
-                return "background-color:rgba(27,169,155,.14);color:#0f7f74;font-weight:600"
-            return "background-color:rgba(240,135,60,.16);color:#d06a24;font-weight:600"
-
-        def _cat_css(v):
-            return "color:#c22" if v == "A classificar" else ""
-
-        _sty = (_view.style
-                .format({"Valor": lambda v: brl(v)})
-                .map(_val_css, subset=["Valor"])
-                .map(_status_css, subset=["Status"])
-                .map(_cat_css, subset=["Categoria"]))
-        st.dataframe(_sty, hide_index=True, use_container_width=True,
-                     height=min(560, 44 + len(_view) * 35))
-
-        # opções controladas (sem edição livre de categorias na tabela)
-        _opt_map = {}
-        for _, rr in _dfa.iterrows():
-            lbl = (f"{rr['data'].strftime('%d/%m/%Y') if pd.notna(rr['data']) else '—'} · "
-                   f"{(rr['descricao'] or '')[:34]} · {brl((rr['entrada'] or 0) - (rr['saida'] or 0))}")
-            _opt_map[f"{lbl}  ⟨{rr['id'][:6]}⟩"] = rr["id"]
-
-        with st.expander("🏷️ Reclassificar um lançamento (escolhe da lista de categorias)"):
-            st.caption("A categoria vem da lista já existente — não dá pra criar/editar categorias aqui "
-                       "(isso é feito em ⚙️ Cadastros). Assim o Orçamento não embola.")
-            rc1, rc2 = st.columns([2, 2])
-            _alvo = rc1.selectbox("Lançamento", list(_opt_map.keys()), key="rc_lanc")
-            _cats_leaf = opcoes_categorias()
-            _nova = rc2.selectbox("Nova categoria", _cats_leaf, key="rc_cat",
-                                  index=(_cats_leaf.index("A classificar") if "A classificar" in _cats_leaf else 0))
-            if st.button("✅ Aplicar categoria", key="rc_apply") and _alvo:
-                store.set_categoria_manual(_opt_map[_alvo], _nova)
-                st.success("Categoria atualizada.")
-                st.rerun()
-
-        with st.expander("✅ Marcar status (Concluído / Pendente)"):
-            _stsel = st.multiselect("Lançamentos", list(_opt_map.keys()), key="st_sel")
-            _stnovo = st.radio("Novo status", ["Concluído", "Pendente"], horizontal=True, key="st_val")
-            if st.button("✓ Aplicar status", key="st_apply") and _stsel:
-                for k in _stsel:
-                    store.set_status(_opt_map[k], _stnovo)
-                st.success(f"{len(_stsel)} lançamento(s) marcado(s) como {_stnovo}.")
-                st.rerun()
-
-        with st.expander("🗑️ Excluir lançamentos"):
-            _del = st.multiselect("Selecione os lançamentos para excluir", list(_opt_map.keys()),
-                                  key="del_sel")
-            if st.button("🗑️ Excluir selecionados", key="del_apply") and _del:
-                for k in _del:
-                    store.delete_transaction(_opt_map[k])
-                st.success(f"{len(_del)} lançamento(s) excluído(s).")
-                st.rerun()
+        _orig = {r["id"]: dict(r) for _, r in _show.iterrows()}
+        st.caption(f"{len(_show)} lançamento(s). **Edite direto na tabela** (Categoria, Subcategoria, "
+                   "Instituição/Cartão e Status são listas). Marque 🗑️ para excluir. Depois clique em **Salvar**.")
+        _edt = st.data_editor(
+            _show, hide_index=True, use_container_width=True, height=min(600, 46 + len(_show) * 36),
+            key="lanc_editor", disabled=["Valor"],
+            column_config={
+                "id": None,
+                "Excluir": st.column_config.CheckboxColumn("🗑️", width="small"),
+                "Data": st.column_config.DateColumn("Data", format="DD/MM/YYYY"),
+                "Categoria": st.column_config.SelectboxColumn("Categoria", options=_maes_l, required=False),
+                "Subcategoria": st.column_config.SelectboxColumn("Subcategoria",
+                                                                 options=["(nenhuma)"] + _subs_l),
+                "Instituição / Cartão": st.column_config.SelectboxColumn("Instituição / Cartão",
+                                                                         options=_contas_l),
+                "Descrição": st.column_config.TextColumn("Descrição"),
+                "Valor": st.column_config.NumberColumn("Valor", format="R$ %.2f"),
+                "Status": st.column_config.SelectboxColumn("Status", options=["Concluído", "Pendente"]),
+            })
+        if st.button("💾 Salvar alterações", type="primary", key="lanc_save"):
+            _nchg = _ndel = 0
+            for _, r in _edt.iterrows():
+                rid = r["id"]
+                o = _orig.get(rid, {})
+                if r["Excluir"]:
+                    store.delete_transaction(rid)
+                    _ndel += 1
+                    continue
+                _camp = {}
+                # categoria + subcategoria -> categoria canônica
+                if r["Categoria"] != o.get("Categoria") or r["Subcategoria"] != o.get("Subcategoria"):
+                    _sub = r["Subcategoria"]
+                    if _sub and _sub != "(nenhuma)":
+                        _catf = _canon_l.get((r["Categoria"], _sub)) or f"{r['Categoria']} › {_sub}"
+                    else:
+                        _catf = _canon_l.get((r["Categoria"], "")) or r["Categoria"]
+                    store.set_categoria_manual(rid, _catf)
+                    _nchg += 1
+                if r["Instituição / Cartão"] != o.get("Instituição / Cartão"):
+                    _camp["fonte"] = r["Instituição / Cartão"]
+                    _camp["escopo"] = _escopo_conta(r["Instituição / Cartão"])
+                if r["Status"] != o.get("Status"):
+                    _camp["status"] = r["Status"]
+                if (r["Descrição"] or "") != (o.get("Descrição") or ""):
+                    _camp["descricao"] = r["Descrição"]
+                if r["Data"] != o.get("Data") and r["Data"]:
+                    _camp["data"] = r["Data"].isoformat()
+                if _camp:
+                    store.atualizar(rid, **_camp)
+                    _nchg += 1
+            st.success(f"{_nchg} alteração(ões) salva(s), {_ndel} excluído(s).")
+            st.rerun()
 
 # ═══════════════════════════ 📊 ORÇAMENTO ═══════════════════════════
 with tab_orc:

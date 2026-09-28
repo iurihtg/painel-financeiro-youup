@@ -220,6 +220,24 @@ def set_status(tx_id, status, db_path=DEFAULT_DB):
         conn.close()
 
 
+_CAMPOS_EDIT = {"fonte", "escopo", "status", "data", "data_pgto", "descricao",
+                "categoria", "categoria_manual", "entrada", "saida", "tipo"}
+
+
+def atualizar(tx_id, db_path=DEFAULT_DB, **campos):
+    """Atualiza campos de um lançamento (edição na tabela). Só colunas conhecidas."""
+    campos = {k: v for k, v in campos.items() if k in _CAMPOS_EDIT}
+    if not campos:
+        return
+    cols = ", ".join(f"{k}=?" for k in campos)
+    conn = connect(db_path)
+    try:
+        conn.execute(f"UPDATE transactions SET {cols} WHERE id=?", (*campos.values(), tx_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def set_data_pgto(tx_id, data_pgto, db_path=DEFAULT_DB):
     conn = connect(db_path)
     try:

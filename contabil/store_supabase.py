@@ -134,6 +134,26 @@ def set_status(tx_id, status, db_path=None):
     r.raise_for_status()
 
 
+_CAMPOS_EDIT = {"fonte", "escopo", "status", "data", "data_pgto", "descricao",
+                "categoria", "categoria_manual", "entrada", "saida", "tipo"}
+
+
+def atualizar(tx_id, db_path=None, **campos):
+    campos = {k: v for k, v in campos.items() if k in _CAMPOS_EDIT}
+    if not campos:
+        return
+    r = requests.patch(_rest(f"transactions?id=eq.{tx_id}"),
+                       headers=_headers({"Prefer": "return=minimal"}), json=campos, timeout=30)
+    if r.status_code == 400 and ("data_pgto" in r.text or "status" in r.text
+                                 or "column" in r.text.lower()):
+        campos2 = {k: v for k, v in campos.items() if k not in ("data_pgto", "status")}
+        if not campos2:
+            return
+        r = requests.patch(_rest(f"transactions?id=eq.{tx_id}"),
+                           headers=_headers({"Prefer": "return=minimal"}), json=campos2, timeout=30)
+    r.raise_for_status()
+
+
 def set_data_pgto(tx_id, data_pgto, db_path=None):
     r = requests.patch(
         _rest(f"transactions?id=eq.{tx_id}"),
