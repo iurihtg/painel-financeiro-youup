@@ -454,6 +454,9 @@ with tab_orc:
                                     cellStyle={"textAlign": "right"})
             for j, lab in enumerate(_mlabels):
                 cs = JsCode("function(p){var s={textAlign:'right'};"
+                            "if(p.data._tipo==='saldo'){var v=parseFloat(p.value);"
+                            "if(!isNaN(v)&&v!==0){s.color=(v<0?'#d64533':'#0f7f74');s.fontWeight='700';}"
+                            "return s;}"
                             "if(p.data['o%d']&&p.data._tipo!=='sec-rec'&&p.data._tipo!=='sec-desp'){"
                             "s.color='#d64533';s.fontWeight='700';}return s;}" % j)
                 gb.configure_column(f"m{j}", headerName=lab, valueFormatter=_brl,
